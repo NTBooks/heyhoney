@@ -1,76 +1,85 @@
-# heyhoney
+# Hey honey, look at this thing I made in Claude!
 
-Your own private Claude Artifacts. Claude builds a page, pushes it to a Cloudflare Worker on your domain, and
-hands you a secret link. No logins. Links expire on their own: **30 days after they're made if nobody opens
-them, or 7 days after the first open.** The page stays, so you can mint a fresh link whenever you want to
-share it again.
+**heyhoney** lets you show the stuff you make with Claude to the people in your life, without making it
+public and without making anybody sign up for anything.
 
-![A shared page, as the recipient sees it](slopscore-1.png)
+You spent the evening with Claude building a budget dashboard, a floor plan for the kitchen, a trip
+itinerary, a mockup for a client. Now you want your partner, your friend or your client to see it. They
+don't have a Claude account. You don't want to post it on the open internet. You just want to text them a
+link that works.
 
-- **Sites** are permanent. Each is a folder with a `site.json`, kept in a separate private git repo (the
-  archive), and mirrored to an R2 bucket.
-- **Links** look like `https://heyhoney.example.com/s/<token>/`, one per recipient, each labelled with who it's
-  for. Only a hash of the token is stored, so the URL is shown exactly once, when it's made.
-- **Claude drives it** through a Claude Code skill. Say "push this to heyhoney for Sam", "new link for the
-  pitch deck", "what's on heyhoney" or "kill Dana's link".
+So you tell Claude **"send this to Sam."** Claude puts the page on your own website and gives you a private
+link. Sam taps it and sees exactly what you made. A week later the link stops working by itself. Nobody had to
+log in, and nothing is left lying around.
+
+```mermaid
+flowchart LR
+  a["🗣️ You<br/>“send this to Sam”"] --> b["🤖 Claude puts it<br/>on your website"]
+  b --> c["🔗 You get a<br/>private link"]
+  c --> d["📱 Sam taps it<br/>and sees it"]
+  d --> e["⏳ The link expires<br/>on its own"]
+```
+
+![What Sam sees](slopscore-1.png)
+
+## What it does
+
+- **Private links, no logins.** Each link is a long random address that nobody can guess. Whoever you send it
+  to just taps it.
+- **Links clean up after themselves.** A link stops working **7 days after it's first opened**, or after
+  **30 days** if nobody opens it.
+- **Your things stay yours.** Everything lives on your own domain and your own Cloudflare account (the free
+  tier is plenty). No middleman service sits in between.
+- **One link per person.** Send the same page to three people and each gets their own link. You can see who
+  opened theirs and shut off any one without touching the others.
+- **Pages stick around, links don't.** Want to show it again next month? Ask for a fresh link.
+- **Optional code for sensitive things.** Add a 6-digit code that you send separately, so a forwarded link
+  alone isn't enough.
+
+## What you say to Claude
+
+| You say | Claude does |
+|---|---|
+| "Push this to heyhoney for Sam" | Puts the page up and gives you Sam's link |
+| "Send the kitchen plan to my contractor, with a code" | A new link plus a 6-digit code to send separately |
+| "What's on heyhoney?" | Lists everything you've shared and which links are still live |
+| "Did Dana open it?" | Shows who opened their link and how many times |
+| "Update the dashboard" | Replaces the page; everyone's existing link shows the new version |
+| "Kill Dana's link" | That link stops working right away |
+
+## What you need
+
+- [Claude Code](https://claude.com/claude-code)
+- A Cloudflare account (free) with a domain on it. heyhoney lives on a subdomain, like `heyhoney.yourname.com`.
+- About ten minutes for [setup](#setup).
+
+---
+
+## Under the hood
+
+The code is this repo, and it's public. What you share lives in a **separate private repo** of your own, so
+nothing personal can end up here by accident.
+
+```mermaid
+flowchart LR
+  claude["Claude Code<br/>+ heyhoney skill"] -- "push this" --> cli["heyhoney CLI<br/>(this repo)"]
+  cli -- "keeps a copy in" --> sites["your private<br/>sites repo"]
+  cli -- "uploads to" --> cf["your Cloudflare<br/>(Worker + storage)"]
+  friend["Sam"] -- "opens the link" --> cf
+```
+
+- **This repo (public):** a small Cloudflare Worker that serves pages, a CLI that uploads them and makes
+  links, and the Claude Code skill that drives the CLI.
+- **Your sites repo (private):** one folder per page you've shared, plus an `INDEX.md` catalog. It's the
+  archive. Links and codes are never written to it.
+- **Cloudflare:** an R2 bucket holds the files and a D1 database tracks links and expiry dates. The Worker is
+  the only part on the internet, and all it does is read.
+- **The skill:** `skill/SKILL.md` is a template. `install-skill` fills in your paths and domain and writes
+  the copy Claude Code loads (`~/.claude/skills/heyhoney/SKILL.md`).
 
 ![The CLI: push, list, links](slopscore-2.png)
 
-## The system
-
-Two repos, one machine, one Cloudflare account. The code is public (this repo). Your content lives in a
-private repo of its own, so nothing you share can ever end up here by accident.
-
-```mermaid
-flowchart TB
-  subgraph gh["GitHub"]
-    pub["<b>heyhoney</b> · public<br/>Worker · CLI · skill · migrations"]
-    priv["<b>heyhoney-sites</b> · private<br/>sites/&lt;slug&gt;/ · INDEX.md"]
-  end
-
-  subgraph pc["Your machine"]
-    claude["Claude Code<br/>+ heyhoney skill"]
-    cli["heyhoney CLI<br/>(checkout of heyhoney)"]
-    sites["sites folder<br/>(checkout of heyhoney-sites)"]
-  end
-
-  subgraph cf["Your Cloudflare account"]
-    worker["Worker<br/>heyhoney.your-domain"]
-    r2[("R2 bucket<br/>site files")]
-    d1[("D1<br/>sites · link hashes · pins")]
-  end
-
-  you(("You"))
-  friend["Recipient's browser"]
-
-  pub -- clone --> cli
-  priv -- clone --> sites
-  cli -- install-skill --> claude
-  claude -- "push · link · revoke" --> cli
-  cli -- "reads + copies into" --> sites
-  sites -- "git push" --> priv
-  cli -- "wrangler r2 put" --> r2
-  cli -- "wrangler d1" --> d1
-  cli -. "wrangler deploy" .-> worker
-  claude -- "URL (+ pin), shown once" --> you
-  you -- "sends it" --> friend
-  friend -- "GET /s/token/" --> worker
-  worker -- "is the link live?" --> d1
-  worker -- "fetch the file" --> r2
-```
-
-- **Public repo (this one):** the Worker, the CLI, the skill template, and the D1 migrations. It knows your
-  subdomain and nothing else.
-- **The skill:** `skill/SKILL.md` is a template with `{{SITES}}`-style placeholders. `install-skill` fills in
-  your paths and domain and writes the copy Claude Code loads, `~/.claude/skills/heyhoney/SKILL.md`. Edit the
-  template, then run `install-skill` again.
-- **Private repo (`heyhoney-sites`):** one folder per site plus `INDEX.md`, the catalog Claude reads. It's the
-  archive: if Cloudflare vanished, `publish` would rebuild everything from here. Link URLs and pins are
-  never written to it.
-- **Cloudflare:** R2 holds a copy of each site's files, and D1 holds the catalog plus token and pin hashes.
-  The Worker is the only thing on the internet, and it only reads.
-
-## How it works
+### How a request is served
 
 ```
  browser ──▶ Worker (src/index.ts) on your subdomain
@@ -94,7 +103,7 @@ flowchart TB
 
 ![What an expired link shows](slopscore-3.png)
 
-## Pins, for the odd sensitive share
+### Codes (pins), for the odd sensitive share
 
 The default is a plain link, one tap. For anything you'd mind being forwarded, add `--pin`:
 
