@@ -28,8 +28,8 @@ tags:
   - artifacts
 slopbucket: [devtools, claude-skills, self-hosted]
 images:
-  - slopscore-1.png
   - slopscore-2.png
+  - slopscore-1.png
   - slopscore-3.png
   - slopscore-4.png
 maintainers: [NTBooks]
