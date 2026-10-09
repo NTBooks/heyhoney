@@ -1,7 +1,14 @@
 // heyhoney: private sites behind secret, self-expiring links.
 //
-//   GET  /s/<token>/<path>   serve <path> of the site the token grants (the site's entry at the root)
-//   POST /s/<token>/<path>   check the link's pin, if it has one, and set its unlock cookie
+//   GET  /s/<token>/<path>        open the site (the site's entry at the root)
+//   POST /s/<token>/<path>        check the link's pin, if it has one, and set its unlock cookie
+//   GET  /s/<token>/~<key>/<path> a sandboxed site's files, loaded by the frame the page above wraps them in
+//
+// Sandboxed sites (the default) never run at the top level of this origin. The top level is a tiny page
+// of ours holding an <iframe sandbox> without allow-same-origin, so the site's scripts get an opaque
+// origin: no cookies or storage on this domain or its parent, no reaching other heyhoney pages. The
+// frame's URL carries the link's unlock key (pinned links) instead of relying on cookies, which an
+// opaque origin does not send. Sites published with sandbox off are served directly, same-origin.
 //
 // Everything else is a blank page. Uploads never come through here: the CLI writes R2 and D1 with
 // wrangler, so this Worker has no write surface and no admin secret.
@@ -23,6 +30,8 @@ interface LinkRow {
   unlock_key: string | null;
   pin_failures: number;
   entry: string;
+  name: string;
+  sandbox: number;
 }
 
 const DAY = 86_400_000;
@@ -42,6 +51,30 @@ const BASE_HEADERS: Record<string, string> = {
   "x-content-type-options": "nosniff",
 };
 
+// What a sandboxed site may still do. Deliberately absent: allow-same-origin (the whole point) and
+// allow-top-navigation (a site could otherwise swap our page for a lookalike without a click).
+const SANDBOX =
+  "allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads " +
+  "allow-pointer-lock allow-presentation allow-top-navigation-by-user-activation";
+
+// Our own pages (wrapper, pin form, notices) run no script and cannot be framed by anyone.
+const OWN_HEADERS = {
+  ...BASE_HEADERS,
+  "content-security-policy":
+    "default-src 'none'; style-src 'unsafe-inline'; frame-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+};
+
+// A sandboxed site's files. The CSP sandbox applies even if a file is opened directly in a tab, SVGs
+// included. Its fetches arrive from an opaque origin, so they need CORS; the token is the secret anyway.
+const FRAME_HEADERS = {
+  ...BASE_HEADERS,
+  "content-security-policy": `sandbox ${SANDBOX}; frame-ancestors 'self'`,
+  "access-control-allow-origin": "*",
+};
+
+// An unsandboxed site's files: same origin, but still nobody else may frame them.
+const DIRECT_HEADERS = { ...BASE_HEADERS, "content-security-policy": "frame-ancestors 'self'" };
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -54,7 +87,7 @@ export default {
 
     const link = await env.DB.prepare(
       `SELECT l.id, l.site_slug, l.first_access_at, l.expires_at, l.revoked_at,
-              l.pin_hash, l.unlock_key, l.pin_failures, s.entry
+              l.pin_hash, l.unlock_key, l.pin_failures, s.entry, s.name, s.sandbox
          FROM links l JOIN sites s ON s.slug = l.site_slug
         WHERE l.token_hash = ?`,
     )
@@ -72,6 +105,18 @@ export default {
     const ua = request.headers.get("user-agent") ?? "";
     if (BOT_UA.test(ua)) return page(200, "heyhoney", "A private link.");
 
+    const sandboxed = link.sandbox !== 0;
+
+    // Inside the frame. The key segment is the link's unlock key when it has a pin, empty otherwise.
+    const frame = sandboxed ? rest.match(/^\/~([A-Za-z0-9_-]*)(\/.*)?$/) : null;
+    if (frame) {
+      if (request.method === "POST") return page(405, "Nope.");
+      const want = link.pin_hash ? link.unlock_key ?? "" : "";
+      if (!safeEqual(frame[1], want)) return page(403, "Open the link itself, not this frame.");
+      return serveFile(request, env, link, frame[2] ?? "/", FRAME_HEADERS);
+    }
+
+    // The top level: pin gate first.
     if (link.pin_hash) {
       if (request.method === "POST") return unlock(request, env, link, token, url, now);
       if (!unlocked(request, link)) return pinPage(401);
@@ -79,42 +124,15 @@ export default {
       return page(405, "Nope.");
     }
 
-    let path: string;
-    try {
-      path = decodeURIComponent(rest.slice(1));
-    } catch {
-      return page(400, "Bad path.");
-    }
-    const isEntry = path === "" || path === link.entry;
-    if (path === "" || path.endsWith("/")) path += path === "" ? link.entry : "index.html";
-    if (path.split("/").some((seg) => seg === ".." || seg === ".")) return page(400, "Bad path.");
-
-    // A real person opening the site (not a sub-resource, not a HEAD) counts as an access.
+    // A real person opening the site (a top-level GET of its entry, not a HEAD) counts as an access.
+    const isEntry = rest === "/" || rest === `/${link.entry}`;
     if (isEntry && request.method === "GET") {
       const mode = request.headers.get("sec-fetch-mode");
       if (!mode || mode === "navigate") await recordView(env, link, now);
     }
 
-    const obj = await env.FILES.get(`${link.site_slug}/${path}`, {
-      range: request.headers,
-      onlyIf: request.headers,
-    });
-    if (!obj) return page(404, "No such file in this site.");
-
-    const headers = new Headers(BASE_HEADERS);
-    obj.writeHttpMetadata(headers);
-    headers.set("etag", obj.httpEtag);
-    headers.set("accept-ranges", "bytes");
-    if (!("body" in obj)) return new Response(null, { status: 304, headers });
-
-    let status = 200;
-    if (request.headers.has("range") && obj.range && "offset" in obj.range) {
-      const start = obj.range.offset ?? 0;
-      const end = start + (obj.range.length ?? obj.size - start) - 1;
-      headers.set("content-range", `bytes ${start}-${end}/${obj.size}`);
-      status = 206;
-    }
-    return new Response(request.method === "HEAD" ? null : obj.body, { status, headers });
+    if (sandboxed) return frameWrapper(link, `/s/${token}/~${link.pin_hash ? link.unlock_key : ""}${rest}${url.search}`, request.method);
+    return serveFile(request, env, link, rest, DIRECT_HEADERS);
   },
 
   // Daily: drop link rows that died long ago. Sites are never removed here; they outlive their links.
@@ -127,6 +145,55 @@ export default {
       .run();
   },
 } satisfies ExportedHandler<Env>;
+
+async function serveFile(request: Request, env: Env, link: LinkRow, rawPath: string, base: Record<string, string>): Promise<Response> {
+  let path: string;
+  try {
+    path = decodeURIComponent(rawPath.slice(1));
+  } catch {
+    return page(400, "Bad path.");
+  }
+  if (path === "" || path.endsWith("/")) path += path === "" ? link.entry : "index.html";
+  if (path.split("/").some((seg) => seg === ".." || seg === ".")) return page(400, "Bad path.");
+
+  const obj = await env.FILES.get(`${link.site_slug}/${path}`, {
+    range: request.headers,
+    onlyIf: request.headers,
+  });
+  if (!obj) return page(404, "No such file in this site.");
+
+  const headers = new Headers(base);
+  obj.writeHttpMetadata(headers);
+  headers.set("etag", obj.httpEtag);
+  headers.set("accept-ranges", "bytes");
+  if (!("body" in obj)) return new Response(null, { status: 304, headers });
+
+  let status = 200;
+  if (request.headers.has("range") && obj.range && "offset" in obj.range) {
+    const start = obj.range.offset ?? 0;
+    const end = start + (obj.range.length ?? obj.size - start) - 1;
+    headers.set("content-range", `bytes ${start}-${end}/${obj.size}`);
+    status = 206;
+  }
+  return new Response(request.method === "HEAD" ? null : obj.body, { status, headers });
+}
+
+// The top level of a sandboxed site: one full-window frame. Its URL differs from ours (the ~ segment),
+// which browsers require, and is never shown in the address bar, so copying the address never copies
+// a pinned link's unlock key.
+function frameWrapper(link: LinkRow, src: string, method: string): Response {
+  const name = esc(link.name);
+  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex">
+<title>${name}</title>
+<style>:root{color-scheme:light dark}html,body{margin:0;height:100%}
+iframe{position:fixed;inset:0;width:100%;height:100%;border:0;display:block}</style></head>
+<body><iframe src="${esc(src)}" title="${name}" sandbox="${SANDBOX}"
+allow="fullscreen; clipboard-write; autoplay; picture-in-picture"></iframe></body></html>`;
+  return new Response(method === "HEAD" ? null : html, {
+    headers: { ...OWN_HEADERS, "content-type": "text/html; charset=utf-8" },
+  });
+}
 
 // Check a submitted pin. Right: set the unlock cookie for this link's path only and send the browser
 // back to where it was. Wrong: count it, and revoke the link once it has eaten MAX_PIN_FAILURES.
@@ -161,7 +228,7 @@ async function unlock(request: Request, env: Env, link: LinkRow, token: string, 
 
 function unlocked(request: Request, link: LinkRow): boolean {
   const cookie = request.headers.get("cookie") ?? "";
-  const m = cookie.match(/(?:^|;s*)hh=([A-Za-z0-9_-]+)/);
+  const m = cookie.match(/(?:^|;\s*)hh=([A-Za-z0-9_-]+)/);
   return !!(m && link.unlock_key && safeEqual(m[1], link.unlock_key));
 }
 
@@ -193,24 +260,28 @@ async function sha256(s: string): Promise<string> {
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+function esc(s: string): string {
+  return s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+}
+
 function text(body: string): Response {
   return new Response(body, { headers: { ...BASE_HEADERS, "content-type": "text/plain; charset=utf-8" } });
 }
 
 function page(status: number, title: string, sub = ""): Response {
-  return shell(status, title, `<h1>${title}</h1>${sub ? `<p>${sub}</p>` : ""}`);
+  return notice(status, title, `<h1>${title}</h1>${sub ? `<p>${sub}</p>` : ""}`);
 }
 
 // The form posts back to the same URL, so whatever path the recipient opened is where they land.
 function pinPage(status: number, error = ""): Response {
-  return shell(status, "heyhoney", `<h1>This one has a code.</h1>
+  return notice(status, "heyhoney", `<h1>This one has a code.</h1>
 <p>Whoever sent you the link has it.</p>
 <form method="post" autocomplete="off">
 <input name="pin" inputmode="numeric" autocomplete="one-time-code" aria-label="Code" placeholder="••••••" required autofocus>
 <button>Open</button></form>${error ? `<p class="err" role="alert">${error}</p>` : ""}`);
 }
 
-function shell(status: number, title: string, body: string): Response {
+function notice(status: number, title: string, body: string): Response {
   const html = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex">
 <meta property="og:title" content="${title}"><title>${title}</title>
@@ -230,5 +301,5 @@ input:focus{outline:2px solid var(--honey);outline-offset:1px}input::placeholder
 button{font:600 1rem system-ui,sans-serif;padding:0 20px;border:0;border-radius:10px;background:var(--honey);color:#2b2418;cursor:pointer}
 .err{margin-top:14px;color:var(--bad)}
 </style></head><body><main><div class="hex"></div>${body}</main></body></html>`;
-  return new Response(html, { status, headers: { ...BASE_HEADERS, "content-type": "text/html; charset=utf-8" } });
+  return new Response(html, { status, headers: { ...OWN_HEADERS, "content-type": "text/html; charset=utf-8" } });
 }

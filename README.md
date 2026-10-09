@@ -35,6 +35,8 @@ flowchart LR
 - **Pages stick around, links don't.** Want to show it again next month? Ask for a fresh link.
 - **Optional code for sensitive things.** Add a 6-digit code that you send separately, so a forwarded link
   alone isn't enough.
+- **Pages can't touch your domain.** Every page runs in a sandbox, so its code can't read your cookies or
+  reach anything else on your domain. Claude warns you if a page ever needs that switched off.
 
 ## What you say to Claude
 
@@ -83,7 +85,8 @@ flowchart LR
 
 ```
  browser ──▶ Worker (src/index.ts) on your subdomain
-             /s/<token>/<path> → sha256(token) → links ⋈ sites → live? → pin unlocked? → R2 <slug>/<path>
+   /s/<token>/<path>          → sha256(token) → links ⋈ sites → live? → pin unlocked? → wrapper page
+   /s/<token>/~<key>/<path>   → (inside the wrapper's sandboxed frame) → R2 <slug>/<path>
 ```
 
 - **Not Cloudflare Pages.** Pages serves static files publicly, so anyone could reach them without a link.
@@ -102,6 +105,26 @@ flowchart LR
 - **Cron** (daily) drops link rows that have been dead for 60 days. Sites are never deleted automatically.
 
 ![What an expired link shows](slopscore-3.png)
+
+### The sandbox (on by default)
+
+Every page you share runs on your domain, so without protection its JavaScript could read cookies for
+`yourname.com`, set cookies that your other subdomains trust, or poke at other heyhoney pages. heyhoney
+doesn't let it.
+
+- **A wrapper at the top.** The link serves a tiny page of ours whose only content is a full-window
+  `<iframe sandbox>` without `allow-same-origin`. The site runs in that frame with a `null` origin: no cookies,
+  no storage, no same-origin access to anything. The wrapper itself runs no script, and nobody else can frame it.
+- **The frame's own URL** is `/s/<token>/~<key>/…`, where `<key>` is the link's unlock key for pinned links
+  (empty otherwise). The page's own fetches, modules and fonts work, because the files carry
+  `Access-Control-Allow-Origin: *` and the key travels in the path rather than in a cookie, which a `null`
+  origin wouldn't send. The address bar only ever shows the plain link.
+- **Belt and braces.** Every file is also served with `Content-Security-Policy: sandbox …`, so opening one
+  directly in a tab (an SVG, say) is sandboxed too.
+- **What breaks:** `localStorage`, `sessionStorage`, IndexedDB, `document.cookie`, service workers, camera,
+  mic and location. `publish` scans each site for these and prints a warning. The skill tells Claude to fix
+  the page first (a `try/catch` fallback is usually enough), and to explain the risk and ask you before ever
+  running `heyhoney sandbox <slug> off`. Unsandboxed sites are flagged in `list` and `INDEX.md`.
 
 ### Codes (pins), for the odd sensitive share
 
@@ -160,6 +183,7 @@ node bin/heyhoney.mjs link <slug> "label"  # a fresh link for an existing site (
 node bin/heyhoney.mjs links [slug]         # every link: unopened, opened, expired, revoked, views
 node bin/heyhoney.mjs revoke <link-id|slug>
 node bin/heyhoney.mjs publish <slug>       # after editing a site folder (changed files only)
+node bin/heyhoney.mjs sandbox <slug> on|off  # isolation is on by default; off only for trusted code
 node bin/heyhoney.mjs unpublish <slug>
 ```
 
@@ -172,5 +196,7 @@ screenshots above came from exactly that.
 - Anyone holding a live link (and its pin, if it has one) can read every file in that site. Don't put secrets
   in one.
 - Corporate mail scanners that open links in a real browser can count as the first open.
+- Sandboxed pages can't remember anything between visits (no `localStorage`). That's the price of isolation;
+  turn the sandbox off per site only for code you trust.
 - Uploads run one wrangler call per file, four at a time. A big folder is slow the first time and fast after,
   because unchanged files are skipped.

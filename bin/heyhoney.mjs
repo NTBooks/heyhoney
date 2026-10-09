@@ -51,7 +51,7 @@ const TYPES = {
 const argv = process.argv.slice(2);
 // --key value, --key=value, or a bare switch. Switches never swallow the next word, so
 // `link deck --pin sam` is a pinned link labelled "sam"; a chosen pin is `--pin=4821`.
-const SWITCHES = new Set(["pin", "local", "json", "force"]);
+const SWITCHES = new Set(["pin", "local", "json", "force", "sandbox", "no-sandbox"]);
 const flags = {};
 const pos = [];
 for (let i = 0; i < argv.length; i++) {
@@ -113,7 +113,7 @@ function readSite(slug) {
   for (const rel of walk(dir)) files[rel] = createHash("sha256").update(fs.readFileSync(path.join(dir, rel))).digest("hex");
   const entry = meta.entry ?? (files["index.html"] ? "index.html" : Object.keys(files)[0]);
   if (!entry || !files[entry]) die(`Site "${slug}" has no entry file (${entry ?? "nothing to serve"}).`);
-  return { dir, meta: { name: meta.name ?? slug, description: meta.description ?? "", entry }, files };
+  return { dir, meta: { name: meta.name ?? slug, description: meta.description ?? "", entry, sandbox: meta.sandbox !== false }, files };
 }
 
 function allSites() {
@@ -151,6 +151,8 @@ function add(src, slug) {
     name: typeof flags.name === "string" ? flags.name : old.name ?? slug,
     description: typeof flags.desc === "string" ? flags.desc : old.description ?? "",
     ...(entry && entry !== "index.html" ? { entry } : {}),
+    // Sandboxed unless told otherwise; an existing site keeps its setting across re-adds.
+    ...((flags["no-sandbox"] ? false : flags.sandbox ? true : old.sandbox) === false ? { sandbox: false } : {}),
   };
   fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2) + "\n");
   writeIndex();
@@ -174,10 +176,11 @@ async function publish(slug) {
   });
 
   const now = Date.now();
-  await sql(`INSERT INTO sites (slug, name, description, entry, files, created_at, updated_at)
-    VALUES (${q(slug)}, ${q(site.meta.name)}, ${q(site.meta.description)}, ${q(site.meta.entry)}, ${q(JSON.stringify(site.files))}, ${now}, ${now})
+  await sql(`INSERT INTO sites (slug, name, description, entry, files, sandbox, created_at, updated_at)
+    VALUES (${q(slug)}, ${q(site.meta.name)}, ${q(site.meta.description)}, ${q(site.meta.entry)}, ${q(JSON.stringify(site.files))},
+      ${site.meta.sandbox ? 1 : 0}, ${now}, ${now})
     ON CONFLICT(slug) DO UPDATE SET name = excluded.name, description = excluded.description, entry = excluded.entry,
-      files = excluded.files, updated_at = excluded.updated_at`);
+      files = excluded.files, sandbox = excluded.sandbox, updated_at = excluded.updated_at`);
 
   // Delete only after the row stops naming them, so a live link never points at a missing file.
   await pool(removed, LOCAL ? 1 : 4, async (rel) => {
@@ -185,6 +188,58 @@ async function publish(slug) {
     process.stdout.write(`  ✕ ${rel}\n`);
   });
   console.log(`Published ${slug}: ${changed.length} uploaded, ${removed.length} removed, ${Object.keys(site.files).length - changed.length} unchanged.`);
+  sandboxReport(slug, site);
+}
+
+// Things a sandboxed page cannot do: its frame has an opaque origin, so these throw or silently fail.
+const SANDBOX_BLOCKERS = [
+  [/\blocalStorage\b/, "localStorage"],
+  [/\bsessionStorage\b/, "sessionStorage"],
+  [/\bindexedDB\b/, "IndexedDB"],
+  [/document\.cookie/, "document.cookie"],
+  [/\bserviceWorker\b/, "service workers"],
+  [/\bcaches\.(?:open|match|keys|has|delete)\b/, "the Cache API"],
+  [/\b(?:window\.)?top\.location\b|\bparent\.(?:document|location)\b/, "navigating or reading the top window"],
+  [/\bgetUserMedia\b|\bgeolocation\b/, "camera, microphone or location"],
+  [/\bNotification\.requestPermission\b/, "notifications"],
+  [/\bnavigator\.credentials\b|\bPublicKeyCredential\b/, "passkeys or saved logins"],
+];
+
+// After a publish: warn when a sandboxed site uses something the sandbox blocks, or remind that a
+// site runs unsandboxed. Claude reads this output; the skill says what to do about it.
+function sandboxReport(slug, site) {
+  if (!site.meta.sandbox) {
+    console.log(`\n  ⚠ ${slug} is NOT sandboxed: its scripts run on ${new URL(PROD_URL).host} itself and can read and set`);
+    console.log(`    cookies for the parent domain and reach any heyhoney page whose link they know. Only for code you trust.`);
+    return;
+  }
+  const hits = new Map();
+  for (const rel of Object.keys(site.files)) {
+    if (!/\.(?:html?|m?js)$/i.test(rel)) continue;
+    const src = fs.readFileSync(path.join(site.dir, rel), "utf8");
+    for (const [re, what] of SANDBOX_BLOCKERS) if (re.test(src)) hits.set(what, [...(hits.get(what) ?? []), rel]);
+  }
+  if (!hits.size) return;
+  console.log(`\n  ⚠ ${slug} is sandboxed but uses things the sandbox blocks:`);
+  for (const [what, files] of hits) console.log(`    - ${what}  (${files.join(", ")})`);
+  console.log(`    Guarded with try/catch they just stay off; unguarded they throw. Fix the page, or if it truly needs`);
+  console.log(`    them: hh sandbox ${slug} off (read the warning that prints first).`);
+}
+
+// Turn a site's sandbox on or off: site.json, plus the live row if it is published.
+async function setSandbox(slug, value) {
+  if (!slug || !["on", "off"].includes(value)) die("usage: sandbox <slug> on|off");
+  const metaPath = path.join(SITES, slug, "site.json");
+  if (!fs.existsSync(metaPath)) die(`No site "${slug}".`);
+  const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+  if (value === "on") delete meta.sandbox;
+  else meta.sandbox = false;
+  fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2) + "\n");
+  writeIndex();
+  const [row] = await sql(`SELECT slug FROM sites WHERE slug = ${q(slug)}`);
+  if (row) await sql(`UPDATE sites SET sandbox = ${value === "on" ? 1 : 0} WHERE slug = ${q(slug)}`);
+  console.log(`Sandbox ${value} for ${slug}${row ? " (live now; existing links included)" : ""}.`);
+  sandboxReport(slug, readSite(slug));
 }
 
 async function link(slug, label = "") {
@@ -251,7 +306,7 @@ async function revoke(target) {
 // The index: every site in the repo, whether it is published, and its live links.
 async function list() {
   const local = allSites().map((slug) => ({ slug, ...readSite(slug).meta }));
-  const remote = Object.fromEntries((await sql(`SELECT slug, updated_at, files FROM sites`)).map((r) => [r.slug, r]));
+  const remote = Object.fromEntries((await sql(`SELECT slug, updated_at, files, sandbox FROM sites`)).map((r) => [r.slug, r]));
   const now = Date.now();
   const live = await sql(`SELECT site_slug, COUNT(*) AS n, MAX(expires_at) AS until FROM links
     WHERE revoked_at IS NULL AND expires_at > ${now} GROUP BY site_slug`);
@@ -263,8 +318,8 @@ async function list() {
     const r = remote[slug];
     let state = "draft";
     if (r && !l) state = "orphan"; // in R2/D1 but deleted from the repo
-    else if (r) state = JSON.stringify(readSite(slug).files) === r.files ? "published" : "stale";
-    return { slug, name: l?.name ?? "", description: l?.description ?? "", state,
+    else if (r) state = JSON.stringify(readSite(slug).files) === r.files && Number(l.sandbox) === r.sandbox ? "published" : "stale";
+    return { slug, name: l?.name ?? "", description: l?.description ?? "", state, sandbox: l ? l.sandbox : r.sandbox === 1,
       updated_at: r ? new Date(r.updated_at).toISOString() : null,
       live_links: liveBy[slug]?.n ?? 0, live_until: liveBy[slug] ? new Date(liveBy[slug].until).toISOString() : null };
   });
@@ -272,7 +327,7 @@ async function list() {
   if (!out.length) return console.log("No sites yet.");
   for (const s of out) {
     const lk = s.live_links ? `${s.live_links} live link(s) to ${fmt(Date.parse(s.live_until))}` : "no live links";
-    console.log(`${s.slug.padEnd(28)} ${s.state.padEnd(10)} ${lk.padEnd(36)} ${s.name}`);
+    console.log(`${s.slug.padEnd(28)} ${s.state.padEnd(10)} ${lk.padEnd(36)} ${s.name}${s.sandbox ? "" : "  [unsandboxed]"}`);
   }
 }
 
@@ -290,11 +345,11 @@ async function unpublish(slug) {
 function writeIndex() {
   const rows = allSites().map((slug) => {
     const s = readSite(slug);
-    return `| [${slug}](${path.basename(SITES)}/${slug}/${s.meta.entry}) | ${s.meta.name} | ${s.meta.description.replace(/\|/g, "\\|")} | ${Object.keys(s.files).length} |`;
+    return `| [${slug}](${path.basename(SITES)}/${slug}/${s.meta.entry}) | ${s.meta.name} | ${s.meta.description.replace(/\|/g, "\\|")} | ${Object.keys(s.files).length} | ${s.meta.sandbox ? "yes" : "**no**"} |`;
   });
   fs.writeFileSync(path.join(SITES, "..", "INDEX.md"),
     `# Sites\n\nGenerated by \`heyhoney add\`. Live link state is not here (it changes on its own); run \`heyhoney list\`.\n\n` +
-    `| Slug | Name | Description | Files |\n|---|---|---|---|\n${rows.join("\n")}\n`);
+    `| Slug | Name | Description | Files | Sandboxed |\n|---|---|---|---|---|\n${rows.join("\n")}\n`);
 }
 
 // Copy skill/SKILL.md into ~/.claude/skills/heyhoney/ with this machine's paths and host filled in.
@@ -322,7 +377,8 @@ function die(msg) {
 const HELP = `heyhoney: private sites behind secret, self-expiring links  (add --local to target wrangler dev)
 
   push <file|dir> <slug> [--name N] [--desc D] [--label L] [--pin]   add + publish + link, the usual one-shot
-  add <file|dir> <slug> [--name N] [--desc D] [--entry F]    copy into <sites>/<slug>/ (lone .html becomes index.html)
+  add <file|dir> <slug> [--name N] [--desc D] [--entry F] [--no-sandbox]
+                                                             copy into <sites>/<slug>/ (lone .html becomes index.html)
   publish <slug> [--force]                                   mirror <sites>/<slug>/ to Cloudflare (changed files only)
   link <slug> [label] [--pin | --pin=CODE] [--json]          mint a new secret link (30d unopened / 7d after first open);
                                                              --pin adds a code to type (10 wrong tries kill the link)
@@ -331,6 +387,7 @@ const HELP = `heyhoney: private sites behind secret, self-expiring links  (add -
   list [--json]                                              the index: sites, publish state, live links
   unpublish <slug>                                           delete from Cloudflare (local copy stays)
   index                                                      rewrite INDEX.md
+  sandbox <slug> on|off                                      isolate the site's scripts (default on; off only for trusted code)
   install-skill                                              install the Claude Code skill, filled in for this machine
 
   sites: ${SITES}
@@ -353,6 +410,7 @@ try {
     case "unpublish": await unpublish(a); break;
     case "index": writeIndex(); console.log("INDEX.md rewritten."); break;
     case "install-skill": installSkill(); break;
+    case "sandbox": await setSandbox(a, b); break;
     default: console.log(HELP);
   }
 } catch (e) {
