@@ -1,6 +1,7 @@
 // heyhoney: private sites behind secret, self-expiring links.
 //
-//   GET /s/<token>/<path>   serve <path> of the site the token grants (the site's entry at the root)
+//   GET  /s/<token>/<path>   serve <path> of the site the token grants (the site's entry at the root)
+//   POST /s/<token>/<path>   check the link's pin, if it has one, and set its unlock cookie
 //
 // Everything else is a blank page. Uploads never come through here: the CLI writes R2 and D1 with
 // wrangler, so this Worker has no write surface and no admin secret.
@@ -18,10 +19,15 @@ interface LinkRow {
   first_access_at: number | null;
   expires_at: number;
   revoked_at: number | null;
+  pin_hash: string | null;
+  unlock_key: string | null;
+  pin_failures: number;
   entry: string;
 }
 
 const DAY = 86_400_000;
+// Wrong pins allowed before the link is revoked. A 6-digit pin has a million values; ten guesses is nothing.
+const MAX_PIN_FAILURES = 10;
 
 // Link unfurlers and scanners. They get a contentless stub and do not start the 7-day clock,
 // so pasting a link into Slack or iMessage neither leaks a preview nor burns the link.
@@ -39,7 +45,7 @@ const BASE_HEADERS: Record<string, string> = {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    if (request.method !== "GET" && request.method !== "HEAD") return page(405, "Nope.");
+    if (!["GET", "HEAD", "POST"].includes(request.method)) return page(405, "Nope.");
     if (url.pathname === "/robots.txt") return text("User-agent: *\nDisallow: /\n");
 
     const m = url.pathname.match(/^\/s\/([A-Za-z0-9_-]{20,64})(\/.*)?$/);
@@ -47,7 +53,8 @@ export default {
     const [, token, rest] = m;
 
     const link = await env.DB.prepare(
-      `SELECT l.id, l.site_slug, l.first_access_at, l.expires_at, l.revoked_at, s.entry
+      `SELECT l.id, l.site_slug, l.first_access_at, l.expires_at, l.revoked_at,
+              l.pin_hash, l.unlock_key, l.pin_failures, s.entry
          FROM links l JOIN sites s ON s.slug = l.site_slug
         WHERE l.token_hash = ?`,
     )
@@ -64,6 +71,13 @@ export default {
 
     const ua = request.headers.get("user-agent") ?? "";
     if (BOT_UA.test(ua)) return page(200, "heyhoney", "A private link.");
+
+    if (link.pin_hash) {
+      if (request.method === "POST") return unlock(request, env, link, token, url, now);
+      if (!unlocked(request, link)) return pinPage(401);
+    } else if (request.method === "POST") {
+      return page(405, "Nope.");
+    }
 
     let path: string;
     try {
@@ -114,6 +128,50 @@ export default {
   },
 } satisfies ExportedHandler<Env>;
 
+// Check a submitted pin. Right: set the unlock cookie for this link's path only and send the browser
+// back to where it was. Wrong: count it, and revoke the link once it has eaten MAX_PIN_FAILURES.
+async function unlock(request: Request, env: Env, link: LinkRow, token: string, url: URL, now: number): Promise<Response> {
+  const form = await request.formData().catch(() => null);
+  const pin = String(form?.get("pin") ?? "").trim();
+  if (pin && safeEqual(await sha256(`${link.id}:${pin}`), link.pin_hash!)) {
+    const maxAge = Math.max(60, Math.ceil((link.expires_at - now) / 1000) + Number(env.OPENED_TTL_DAYS) * 86_400);
+    return new Response(null, {
+      status: 303,
+      headers: {
+        ...BASE_HEADERS,
+        location: url.pathname + url.search,
+        "set-cookie": `hh=${link.unlock_key}; Path=/s/${token}/; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Lax`,
+      },
+    });
+  }
+  const failures = link.pin_failures + 1;
+  await env.DB.prepare(
+    `UPDATE links SET pin_failures = pin_failures + 1,
+            revoked_at = CASE WHEN pin_failures + 1 >= ?2 THEN ?3 ELSE revoked_at END
+      WHERE id = ?1`,
+  )
+    .bind(link.id, MAX_PIN_FAILURES, now)
+    .run();
+  if (failures >= MAX_PIN_FAILURES) {
+    return page(403, "Too many wrong codes.", "This link is closed now. Ask whoever sent it for a fresh one.");
+  }
+  const left = MAX_PIN_FAILURES - failures;
+  return pinPage(401, `That's not it. ${left} ${left === 1 ? "try" : "tries"} left.`);
+}
+
+function unlocked(request: Request, link: LinkRow): boolean {
+  const cookie = request.headers.get("cookie") ?? "";
+  const m = cookie.match(/(?:^|;s*)hh=([A-Za-z0-9_-]+)/);
+  return !!(m && link.unlock_key && safeEqual(m[1], link.unlock_key));
+}
+
+function safeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
 async function recordView(env: Env, link: LinkRow, now: number): Promise<void> {
   if (link.first_access_at === null) {
     // First open: the clock switches from "30 days unopened" to "7 days from now". The guard on
@@ -140,18 +198,37 @@ function text(body: string): Response {
 }
 
 function page(status: number, title: string, sub = ""): Response {
+  return shell(status, title, `<h1>${title}</h1>${sub ? `<p>${sub}</p>` : ""}`);
+}
+
+// The form posts back to the same URL, so whatever path the recipient opened is where they land.
+function pinPage(status: number, error = ""): Response {
+  return shell(status, "heyhoney", `<h1>This one has a code.</h1>
+<p>Whoever sent you the link has it.</p>
+<form method="post" autocomplete="off">
+<input name="pin" inputmode="numeric" autocomplete="one-time-code" aria-label="Code" placeholder="••••••" required autofocus>
+<button>Open</button></form>${error ? `<p class="err" role="alert">${error}</p>` : ""}`);
+}
+
+function shell(status: number, title: string, body: string): Response {
   const html = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex">
 <meta property="og:title" content="${title}"><title>${title}</title>
 <style>
-:root{color-scheme:light dark;--bg:#fbf7ef;--fg:#2b2418;--mute:#8a7a5c;--honey:#e0a526}
-@media (prefers-color-scheme:dark){:root{--bg:#17140f;--fg:#efe6d4;--mute:#a59473}}
+:root{color-scheme:light dark;--bg:#fbf7ef;--fg:#2b2418;--mute:#8a7a5c;--honey:#e0a526;--line:#dccfb4;--field:#fff;--bad:#b4452f}
+@media (prefers-color-scheme:dark){:root{--bg:#17140f;--fg:#efe6d4;--mute:#a59473;--line:#3a3226;--field:#211c15;--bad:#e8806c}}
 body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--fg);
 font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;padding:0 16px}
 main{text-align:center;max-width:28rem}
 .hex{width:44px;height:50px;margin:0 auto 18px;background:var(--honey);
 clip-path:polygon(50% 0,100% 25%,100% 75%,50% 100%,0 75%,0 25%)}
 h1{font-size:1.25rem;font-weight:600;margin:0 0 6px}p{margin:0;color:var(--mute)}
-</style></head><body><main><div class="hex"></div><h1>${title}</h1>${sub ? `<p>${sub}</p>` : ""}</main></body></html>`;
+form{display:flex;gap:8px;justify-content:center;margin:22px 0 0}
+input{width:9.5rem;font:600 1.25rem/1 ui-monospace,Consolas,monospace;letter-spacing:.2em;text-align:center;padding:12px;
+border:1px solid var(--line);border-radius:10px;background:var(--field);color:var(--fg)}
+input:focus{outline:2px solid var(--honey);outline-offset:1px}input::placeholder{color:var(--line)}
+button{font:600 1rem system-ui,sans-serif;padding:0 20px;border:0;border-radius:10px;background:var(--honey);color:#2b2418;cursor:pointer}
+.err{margin-top:14px;color:var(--bad)}
+</style></head><body><main><div class="hex"></div>${body}</main></body></html>`;
   return new Response(html, { status, headers: { ...BASE_HEADERS, "content-type": "text/html; charset=utf-8" } });
 }

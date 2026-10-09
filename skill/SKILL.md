@@ -41,7 +41,7 @@ The user's private alternative to Artifacts, served from `{{URL}}`.
 4. Commit the **sites** repo (never the tool repo, which is public):
    `git -C {{SITES_REPO}} add -A && git -C {{SITES_REPO}} commit -m "Add <slug>" && git -C {{SITES_REPO}} push`.
    Never commit a link URL (not in commit messages, `site.json`, or any file).
-5. Reply with the URL on its own line, who it is labelled for, and when it expires.
+5. Reply with the URL on its own line, who it is labelled for, and when it expires (and the pin, if any).
 
 ## Everything else
 
@@ -52,6 +52,7 @@ The user's private alternative to Artifacts, served from `{{URL}}`.
 | Every link and whether it was opened | `hh links [slug]` |
 | Update a site, keep its links | `hh add <file|dir> <slug>` then `hh publish <slug>`, then commit the sites repo |
 | Edit files in place | edit `{{SITES}}/<slug>/...` directly, then `hh publish <slug>`, then commit |
+| A link that also needs a code | `hh link <slug> "label" --pin` (or `--pin=4821` to choose; works on `push` too) |
 | Kill one link / every link to a site | `hh revoke <link-id>` / `hh revoke <slug>` |
 | Take a site offline entirely | `hh unpublish <slug>` (the local copy stays; `git rm` it too if they want it gone) |
 
@@ -61,6 +62,14 @@ it or restore it).
 
 `publish` uploads only changed files, deletes files removed from the folder, and leaves links untouched, so an
 update reaches everyone who already has a link.
+
+## Pins
+
+Default to a plain link: the whole point is "hey honey, look at this" with no friction. Add `--pin` when the
+user asks for a code or passcode, or when the content is something they'd mind being forwarded (money,
+health, private documents, anything with an address in it). The pin is printed once, next to the URL. Show both,
+and tell the user to send the pin another way than the link. Ten wrong codes revoke the link; `hh links` shows
+wrong tries. If a recipient locks themselves out, mint a fresh pinned link.
 
 ## Gotchas
 

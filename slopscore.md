@@ -31,6 +31,7 @@ images:
   - slopscore-1.png
   - slopscore-2.png
   - slopscore-3.png
+  - slopscore-4.png
 maintainers: [NTBooks]
 ---
 
@@ -46,7 +47,8 @@ The files sit in a private R2 bucket and the Worker only serves what a live toke
 endpoint at all; the CLI uses my own wrangler login, so there is nothing on the internet to guess a password
 for. Slack and iMessage previews get a blank card, so pasting a link into chat doesn't burn it.
 
-What it isn't: access control for anything that matters. Whoever has the link has the page. That's the deal
-with every secret link, and I'd rather say it than pretend.
+What it isn't: real access control. Whoever has the link has the page, which is the deal with every secret
+link. For the odd thing I'd mind being forwarded there's an optional six-digit code, sent separately, and ten
+wrong guesses kill the link. Still no logins.
 
 tl;dr: Artifacts, but mine, and they clean up after themselves.

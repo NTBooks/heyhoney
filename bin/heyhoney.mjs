@@ -3,7 +3,7 @@
 // archive); this mirrors them to R2 + D1 through wrangler and mints secret links. Run `node bin/heyhoney.mjs help`.
 
 import { execFile } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomInt } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -49,14 +49,19 @@ const TYPES = {
 // ---- args -------------------------------------------------------------------------------------
 
 const argv = process.argv.slice(2);
+// --key value, --key=value, or a bare switch. Switches never swallow the next word, so
+// `link deck --pin sam` is a pinned link labelled "sam"; a chosen pin is `--pin=4821`.
+const SWITCHES = new Set(["pin", "local", "json", "force"]);
 const flags = {};
 const pos = [];
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a.startsWith("--")) {
+    const eq = a.indexOf("=");
+    if (eq > 2) { flags[a.slice(2, eq)] = a.slice(eq + 1); continue; }
     const key = a.slice(2);
     const next = argv[i + 1];
-    if (next !== undefined && !next.startsWith("--")) (flags[key] = next), i++;
+    if (!SWITCHES.has(key) && next !== undefined && !next.startsWith("--")) (flags[key] = next), i++;
     else flags[key] = true;
   } else pos.push(a);
 }
@@ -190,14 +195,27 @@ async function link(slug, label = "") {
   const id = randomBytes(4).toString("hex");
   const now = Date.now();
   const expires = now + UNOPENED_TTL_DAYS * DAY;
-  await sql(`INSERT INTO links (id, token_hash, site_slug, label, created_at, expires_at)
-    VALUES (${q(id)}, ${q(createHash("sha256").update(token).digest("hex"))}, ${q(slug)}, ${q(label)}, ${now}, ${expires})`);
+  const sha = (s) => createHash("sha256").update(s).digest("hex");
+
+  // --pin makes a 6-digit code; --pin=<code> uses that one. The Worker only ever sees its hash.
+  let pin = null;
+  if (flags.pin === true) pin = String(randomInt(0, 1_000_000)).padStart(6, "0");
+  else if (typeof flags.pin === "string") {
+    pin = flags.pin.trim();
+    if (!/^\S{4,32}$/.test(pin)) die("A pin is 4 to 32 characters with no spaces.");
+  }
+  const pinHash = pin ? sha(`${id}:${pin}`) : null;
+  const unlockKey = pin ? randomBytes(24).toString("base64url") : null;
+
+  await sql(`INSERT INTO links (id, token_hash, site_slug, label, created_at, expires_at, pin_hash, unlock_key)
+    VALUES (${q(id)}, ${q(sha(token))}, ${q(slug)}, ${q(label)}, ${now}, ${expires}, ${q(pinHash)}, ${q(unlockKey)})`);
   const url = `${BASE_URL}/s/${token}/`;
-  if (flags.json) console.log(JSON.stringify({ id, slug, label, url, expires_if_unopened: new Date(expires).toISOString() }));
+  if (flags.json) console.log(JSON.stringify({ id, slug, label, url, ...(pin ? { pin } : {}), expires_if_unopened: new Date(expires).toISOString() }));
   else {
     console.log(`\n  ${url}\n`);
+    if (pin) console.log(`  pin  ${pin}   send it separately from the link (another app, or say it out loud)\n`);
     console.log(`  link ${id} for ${slug}${label ? ` (${label})` : ""}: dies ${fmt(expires)} if unopened, or 7 days after first open.`);
-    console.log(`  This is the only time the URL is shown; heyhoney stores just its hash.\n`);
+    console.log(`  This is the only time the URL${pin ? " and pin are" : " is"} shown; heyhoney stores just hashes.\n`);
   }
   return url;
 }
@@ -209,13 +227,15 @@ function linkState(l, now = Date.now()) {
 }
 
 async function links(slug) {
-  const rows = await sql(`SELECT * FROM links ${slug ? `WHERE site_slug = ${q(slug)}` : ""} ORDER BY created_at DESC`);
+  const rows = await sql(`SELECT id, site_slug, label, created_at, first_access_at, expires_at, revoked_at, views,
+    pin_hash IS NOT NULL AS pinned, pin_failures FROM links ${slug ? `WHERE site_slug = ${q(slug)}` : ""} ORDER BY created_at DESC`);
   if (flags.json) return console.log(JSON.stringify(rows.map((l) => ({ ...l, state: linkState(l) })), null, 2));
   if (!rows.length) return console.log("No links.");
   for (const l of rows) {
     const st = linkState(l);
     const when = st === "unopened" || st === "opened" ? `until ${fmt(l.expires_at)}` : "";
-    console.log(`${l.id}  ${l.site_slug.padEnd(24)} ${st.padEnd(9)} ${String(l.views).padStart(3)} views  ${when.padEnd(24)} ${l.label}`);
+    const pin = l.pinned ? (l.pin_failures ? `pin, ${l.pin_failures} wrong` : "pin") : "";
+    console.log(`${l.id}  ${l.site_slug.padEnd(24)} ${st.padEnd(9)} ${String(l.views).padStart(3)} views  ${when.padEnd(24)} ${pin.padEnd(13)} ${l.label}`);
   }
 }
 
@@ -301,10 +321,11 @@ function die(msg) {
 
 const HELP = `heyhoney: private sites behind secret, self-expiring links  (add --local to target wrangler dev)
 
-  push <file|dir> <slug> [--name N] [--desc D] [--label L]   add + publish + link, the usual one-shot
+  push <file|dir> <slug> [--name N] [--desc D] [--label L] [--pin]   add + publish + link, the usual one-shot
   add <file|dir> <slug> [--name N] [--desc D] [--entry F]    copy into <sites>/<slug>/ (lone .html becomes index.html)
   publish <slug> [--force]                                   mirror <sites>/<slug>/ to Cloudflare (changed files only)
-  link <slug> [label] [--json]                               mint a new secret link (30d unopened / 7d after first open)
+  link <slug> [label] [--pin | --pin=CODE] [--json]          mint a new secret link (30d unopened / 7d after first open);
+                                                             --pin adds a code to type (10 wrong tries kill the link)
   links [slug] [--json]                                      every link and its state
   revoke <link-id | slug>                                    kill one link, or every link to a site
   list [--json]                                              the index: sites, publish state, live links

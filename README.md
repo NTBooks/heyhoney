@@ -16,14 +16,65 @@ share it again.
 
 ![The CLI: push, list, links](slopscore-2.png)
 
+## The system
+
+Two repos, one machine, one Cloudflare account. The code is public (this repo). Your content lives in a
+private repo of its own, so nothing you share can ever end up here by accident.
+
+```mermaid
+flowchart TB
+  subgraph gh["GitHub"]
+    pub["<b>heyhoney</b> · public<br/>Worker · CLI · skill · migrations"]
+    priv["<b>heyhoney-sites</b> · private<br/>sites/&lt;slug&gt;/ · INDEX.md"]
+  end
+
+  subgraph pc["Your machine"]
+    claude["Claude Code<br/>+ heyhoney skill"]
+    cli["heyhoney CLI<br/>(checkout of heyhoney)"]
+    sites["sites folder<br/>(checkout of heyhoney-sites)"]
+  end
+
+  subgraph cf["Your Cloudflare account"]
+    worker["Worker<br/>heyhoney.your-domain"]
+    r2[("R2 bucket<br/>site files")]
+    d1[("D1<br/>sites · link hashes · pins")]
+  end
+
+  you(("You"))
+  friend["Recipient's browser"]
+
+  pub -- clone --> cli
+  priv -- clone --> sites
+  cli -- install-skill --> claude
+  claude -- "push · link · revoke" --> cli
+  cli -- "reads + copies into" --> sites
+  sites -- "git push" --> priv
+  cli -- "wrangler r2 put" --> r2
+  cli -- "wrangler d1" --> d1
+  cli -. "wrangler deploy" .-> worker
+  claude -- "URL (+ pin), shown once" --> you
+  you -- "sends it" --> friend
+  friend -- "GET /s/token/" --> worker
+  worker -- "is the link live?" --> d1
+  worker -- "fetch the file" --> r2
+```
+
+- **Public repo (this one):** the Worker, the CLI, the skill template, and the D1 migrations. It knows your
+  subdomain and nothing else.
+- **The skill:** `skill/SKILL.md` is a template with `{{SITES}}`-style placeholders. `install-skill` fills in
+  your paths and domain and writes the copy Claude Code loads, `~/.claude/skills/heyhoney/SKILL.md`. Edit the
+  template, then run `install-skill` again.
+- **Private repo (`heyhoney-sites`):** one folder per site plus `INDEX.md`, the catalog Claude reads. It's the
+  archive: if Cloudflare vanished, `publish` would rebuild everything from here. Link URLs and pins are
+  never written to it.
+- **Cloudflare:** R2 holds a copy of each site's files, and D1 holds the catalog plus token and pin hashes.
+  The Worker is the only thing on the internet, and it only reads.
+
 ## How it works
 
 ```
- bin/heyhoney.mjs ──wrangler──▶ R2 bucket   <slug>/<path>        site files
-                  ──wrangler──▶ D1 database sites, links         catalog + expiry
-
  browser ──▶ Worker (src/index.ts) on your subdomain
-             /s/<token>/<path> → sha256(token) → links ⋈ sites → still live? → R2 <slug>/<path>
+             /s/<token>/<path> → sha256(token) → links ⋈ sites → live? → pin unlocked? → R2 <slug>/<path>
 ```
 
 - **Not Cloudflare Pages.** Pages serves static files publicly, so anyone could reach them without a link.
@@ -42,6 +93,27 @@ share it again.
 - **Cron** (daily) drops link rows that have been dead for 60 days. Sites are never deleted automatically.
 
 ![What an expired link shows](slopscore-3.png)
+
+## Pins, for the odd sensitive share
+
+The default is a plain link, one tap. For anything you'd mind being forwarded, add `--pin`:
+
+```bash
+node bin/heyhoney.mjs link pitch-deck "dana" --pin          # makes a 6-digit code
+node bin/heyhoney.mjs link pitch-deck "dana" --pin=4821     # or choose one
+```
+
+The link then opens a code page first. Send the code another way (a different app, or say it out loud), so a
+leaked or forwarded link isn't enough on its own.
+
+![The code page](slopscore-4.png)
+
+- **Once per browser.** The right code sets an `HttpOnly`, `Secure` cookie scoped to that one link's path. It
+  holds a random per-link key, so it can't be forged and doesn't unlock any other link.
+- **Ten wrong codes revoke the link.** A 6-digit code has a million values, and ten guesses won't find it.
+  `links` shows how many wrong tries each pinned link has taken.
+- **Only hashes are stored.** Like the URL, the code is printed once, when the link is made.
+- **The clock starts on unlock**, not when someone lands on the code page.
 
 ## Setup
 
@@ -75,7 +147,7 @@ node bin/heyhoney.mjs install-skill     # writes ~/.claude/skills/heyhoney/SKILL
 ```
 node bin/heyhoney.mjs push <file|dir> <slug> --name "Title" --desc "What it is" --label "for whom"
 node bin/heyhoney.mjs list                 # the index: sites, publish state, live links
-node bin/heyhoney.mjs link <slug> "label"  # a fresh link for an existing site
+node bin/heyhoney.mjs link <slug> "label"  # a fresh link for an existing site (add --pin for a code)
 node bin/heyhoney.mjs links [slug]         # every link: unopened, opened, expired, revoked, views
 node bin/heyhoney.mjs revoke <link-id|slug>
 node bin/heyhoney.mjs publish <slug>       # after editing a site folder (changed files only)
@@ -88,7 +160,8 @@ screenshots above came from exactly that.
 
 ## Limits
 
-- Anyone holding a live link can read every file in that site. Don't put secrets in one.
+- Anyone holding a live link (and its pin, if it has one) can read every file in that site. Don't put secrets
+  in one.
 - Corporate mail scanners that open links in a real browser can count as the first open.
 - Uploads run one wrangler call per file, four at a time. A big folder is slow the first time and fast after,
   because unchanged files are skipped.
