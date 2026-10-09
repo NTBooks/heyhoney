@@ -1,0 +1,21 @@
+{
+  "name": "heyhoney",
+  "private": true,
+  "type": "module",
+  "description": "Private sites behind secret, self-expiring links on heyhoney.nicktantillo.com",
+  "bin": {
+    "heyhoney": "bin/heyhoney.mjs"
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:migrate": "wrangler d1 migrations apply heyhoney --remote",
+    "db:migrate:local": "wrangler d1 migrations apply heyhoney --local",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261009.1",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.149.0"
+  }
+}

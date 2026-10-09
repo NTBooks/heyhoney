@@ -1,0 +1,8 @@
+node_modules/
+.wrangler/
+.dev.vars
+
+# Your content lives in its own private repo, not here (see README).
+heyhoney.local.json
+sites/
+INDEX.md

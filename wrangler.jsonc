@@ -1,0 +1,22 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "heyhoney",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  // Only the custom domain answers. No workers.dev or preview hostnames to leak or index.
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [{ "pattern": "heyhoney.nicktantillo.com", "custom_domain": true }],
+  "d1_databases": [
+    { "binding": "DB", "database_name": "heyhoney", "database_id": "82980e52-44f0-462b-a8ee-ac0b4294595d", "migrations_dir": "migrations" }
+  ],
+  "r2_buckets": [{ "binding": "FILES", "bucket_name": "heyhoney" }],
+  "vars": {
+    // A link lives 30 days unopened (set by the CLI at mint time), then this many days after its first open.
+    "OPENED_TTL_DAYS": "7",
+    // Dead link rows are kept this long for `heyhoney links`, then the cron drops them.
+    "PRUNE_AFTER_DAYS": "60"
+  },
+  "triggers": { "crons": ["17 9 * * *"] },
+  "observability": { "enabled": true }
+}
