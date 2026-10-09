@@ -362,14 +362,45 @@ function writeIndex() {
 }
 
 // Copy skill/SKILL.md into ~/.claude/skills/heyhoney/ with this machine's paths and host filled in.
+//
+// Every agent that reads Agent Skills (a folder with a SKILL.md) can drive heyhoney; each looks in its own place:
+//   claude       ~/.claude/skills                Claude Code. Cursor and Muse Code read it too.
+//   agents       ~/.agents/skills                Codex, Cursor, Muse Code.
+//   antigravity  ~/.gemini/config/skills         Antigravity IDE and 2.0 (older IDEs: ~/.gemini/antigravity/skills),
+//                ~/.gemini/antigravity-cli/skills  and its CLI.
+// Without --for, it installs for the tools it finds, and skips ~/.agents when ~/.claude already covers
+// Cursor and Muse Code, so they don't list the skill twice.
 function installSkill() {
+  const home = os.homedir();
+  const has = (p) => fs.existsSync(path.join(home, p));
+  const dirs = {
+    claude: () => [".claude/skills"],
+    agents: () => [".agents/skills"],
+    antigravity: () => [
+      has(".gemini/config") || !has(".gemini/antigravity") ? ".gemini/config/skills" : ".gemini/antigravity/skills",
+      ...(has(".gemini/antigravity-cli") ? [".gemini/antigravity-cli/skills"] : []),
+    ],
+  };
+  let targets = typeof flags.for === "string" ? flags.for.split(",").map((t) => t.trim()) : [
+    ...(has(".claude") ? ["claude"] : []),
+    ...(has(".codex") || (!has(".claude") && (has(".cursor") || has(".agents") || has(".config/muse"))) ? ["agents"] : []),
+    ...(has(".gemini") ? ["antigravity"] : []),
+  ];
+  if (!targets.length) targets = ["agents"];
+  const unknown = targets.filter((t) => !(t in dirs));
+  if (unknown.length) die(`Unknown --for target(s): ${unknown.join(", ")}. Use claude, agents, antigravity.`);
+
   const fill = { HEYHONEY: ROOT, SITES, SITES_REPO: path.resolve(SITES, ".."), URL: PROD_URL };
   const body = fs.readFileSync(path.join(ROOT, "skill", "SKILL.md"), "utf8")
     .replace(/\{\{(\w+)\}\}/g, (m, k) => (k in fill ? fill[k].split(path.sep).join("/") : m));
-  const dest = path.join(os.homedir(), ".claude", "skills", "heyhoney", "SKILL.md");
-  fs.mkdirSync(path.dirname(dest), { recursive: true });
-  fs.writeFileSync(dest, body);
-  console.log(`Installed ${dest}`);
+  for (const t of targets) {
+    for (const d of dirs[t]()) {
+      const dest = path.join(home, d, "heyhoney", "SKILL.md");
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.writeFileSync(dest, body);
+      console.log(`Installed ${dest}  (${t})`);
+    }
+  }
 }
 
 // ---- main -------------------------------------------------------------------------------------
@@ -397,7 +428,7 @@ const HELP = `heyhoney: private sites behind secret, self-expiring links  (add -
   unpublish <slug>                                           delete from Cloudflare (local copy stays)
   index                                                      rewrite INDEX.md
   sandbox <slug> on|off                                      isolate the site's scripts (default on; off only for trusted code)
-  install-skill                                              install the Claude Code skill, filled in for this machine
+  install-skill [--for claude,agents,antigravity]            install the skill for your AI coding tools, filled in for this machine
 
   sites: ${SITES}
   host:  ${PROD_URL}`;

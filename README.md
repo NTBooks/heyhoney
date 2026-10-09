@@ -2,6 +2,10 @@
 
 - **Host small private HTML sites to share.** Pages, dashboards, mockups, little apps: anything Claude
   makes as HTML, on your own website.
+- **All your artifacts in one place.** Whether a page came from Claude, ChatGPT, Gemini, Codex, Cursor,
+  Antigravity or Muse, it lands in the same catalog, on the same domain, under the same link rules. You get one
+  list of everything you've shared and who can still see it, instead of share links scattered across five
+  chat histories.
 - **See who opened it, and when.** Each person gets their own secret link with their name on it, so you
   can tell that Neal opened his on Tuesday and Sam hasn't yet.
 - **Links expire on their own.** Nothing to remember to take down.
@@ -61,9 +65,35 @@ flowchart LR
 
 ## What you need
 
-- [Claude Code](https://claude.com/claude-code)
+- An AI coding agent that reads skills: [Claude Code](https://claude.com/claude-code), Codex, Cursor,
+  Antigravity or Muse Code (see [the next section](#works-with-your-other-ai-tools)). Or skip the agent and
+  use the CLI by hand.
 - A Cloudflare account (free) with a domain on it. heyhoney lives on a subdomain, like `heyhoney.yourname.com`.
 - About ten minutes for [setup](#setup).
+
+## Works with your other AI tools
+
+The heyhoney skill is a plain `SKILL.md`, the [Agent Skills](https://agentskills.io) format. Claude Code,
+OpenAI's Codex, Cursor, Google's Antigravity and Meta's Muse Code all read it, so any of them can push pages,
+make links and answer "did Sam open it?". `heyhoney install-skill` finds the tools on your machine and puts the
+skill where each one looks:
+
+| Tool | Where the skill goes | Notes |
+|---|---|---|
+| **Claude Code** | `~/.claude/skills/heyhoney/` | |
+| **Codex** (OpenAI) | `~/.agents/skills/heyhoney/` | |
+| **Cursor** | `~/.claude/skills/` or `~/.agents/skills/` | Reads both, so it's covered by either install |
+| **Antigravity** (Google) | `~/.gemini/config/skills/heyhoney/` | Older IDE builds use `~/.gemini/antigravity/skills/`; the Antigravity CLI uses `~/.gemini/antigravity-cli/skills/` |
+| **Muse Code** (Meta) | `~/.agents/skills/` or `~/.claude/skills/` | Reads both, like Cursor |
+
+To pick the targets yourself, use `install-skill --for claude,agents,antigravity`. The installer skips
+`~/.agents` when `~/.claude` already covers Cursor and Muse Code, so they don't list the skill twice.
+
+**Made it in a chat app instead?** ChatGPT Canvas, Gemini Canvas, claude.ai Artifacts and Meta AI all let you
+copy or download the HTML. Save it to a file and either hand it to your agent ("push this to heyhoney for Sam")
+or run `heyhoney push page.html my-page --label sam` yourself. Pages from these tools usually load React or
+Tailwind from a CDN, which works fine in the sandbox. Their own share links are public and permanent;
+heyhoney's are private, per person, and expire.
 
 ---
 
@@ -87,7 +117,7 @@ flowchart LR
 - **Cloudflare:** an R2 bucket holds the files and a D1 database tracks links and expiry dates. The Worker is
   the only part on the internet, and all it does is read.
 - **The skill:** `skill/SKILL.md` is a template. `install-skill` fills in your paths and domain and writes
-  the copy Claude Code loads (`~/.claude/skills/heyhoney/SKILL.md`).
+  a copy into each AI tool's skills folder ([see the table](#works-with-your-other-ai-tools)).
 
 ![The CLI: push, list, links](slopscore-2.png)
 
@@ -183,7 +213,7 @@ Keep your content out of this repo. Make a private repo for it and point the CLI
 ```bash
 git init ../heyhoney-sites && mkdir ../heyhoney-sites/sites
 echo '{ "sites": "../heyhoney-sites/sites" }' > heyhoney.local.json   # git-ignored
-node bin/heyhoney.mjs install-skill     # writes ~/.claude/skills/heyhoney/SKILL.md with your paths
+node bin/heyhoney.mjs install-skill     # installs the skill for Claude Code, Codex, Cursor, Antigravity, Muse Code
 ```
 
 ## CLI

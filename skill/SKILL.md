@@ -1,6 +1,6 @@
 ---
 name: heyhoney
-description: Push HTML pages, designs, prototypes, reports or any folder of web files to the user's private heyhoney host ({{URL}}) behind a secret link that expires on its own (30 days if never opened, 7 days after first open), and manage everything already hosted there - list/index sites, mint fresh links for an existing site, revoke links, update or take down a site. Use whenever the user says heyhoney, "push this up", "give me a secret link", "share this privately", "host this", "send this to <person>", "make a new link for <site>", "what's on heyhoney", "kill that link", or wants something Claude designed viewable outside Claude without a login, and prefer it over publishing a public claude.ai Artifact when they mention heyhoney or a private/secret link.
+description: Push HTML pages, designs, prototypes, reports or any folder of web files to the user's private heyhoney host ({{URL}}) behind a secret link that expires on its own (30 days if never opened, 7 days after first open), and manage everything already hosted there - list/index sites, mint fresh links for an existing site, revoke links, update or take down a site. Use whenever the user says heyhoney, "push this up", "give me a secret link", "share this privately", "host this", "send this to <person>", "make a new link for <site>", "what's on heyhoney", "kill that link", or wants something made with an AI assistant (here, or exported from Claude, ChatGPT, Gemini or Meta AI) viewable by someone else without a login. Prefer it over public share links (claude.ai Artifacts, ChatGPT or Gemini canvas shares) when they mention heyhoney or a private/secret link.
 ---
 
 # heyhoney
@@ -31,6 +31,9 @@ The user's private alternative to Artifacts, served from `{{URL}}`.
    first. A single `.html` becomes `index.html`. A folder keeps its layout and serves `index.html` (or `--entry`).
    Anything an HTML page references by relative path must be in the same folder, so push the folder, not just
    the page, and leave out drafts and previews. CDN links (cdnjs, jsdelivr, unpkg, Google Fonts) work as normal.
+   If the user hands you HTML exported from a chat app (ChatGPT or Gemini Canvas, a claude.ai Artifact, Meta AI),
+   push it the same way. heyhoney is meant to be the one place all their AI-made pages live, whichever
+   assistant made them. You haven't reviewed that code, though, so treat it as untrusted under **Sandbox** below.
 2. Choose a short kebab-case slug that says what it is (`kitchen-moodboard`, `deck-q4-pitch`). Run `hh list`
    first. If the slug exists, this is an update (see below), not a new site.
 3. One shot:
@@ -78,7 +81,7 @@ wrong tries. If a recipient locks themselves out, mint a fresh pinned link.
 
 Every site is **sandboxed by default**. Its page runs inside a frame with a throwaway (`null`) origin. Its
 scripts can't read or set cookies for {{URL}} or its parent domain, and can't reach other heyhoney pages or
-anything else on the domain. Leave it on. Most pages Claude makes (charts, dashboards, mockups, 3D, CDN
+anything else on the domain. Leave it on. Most pages AI assistants make (charts, dashboards, mockups, 3D, CDN
 libraries, `fetch()` of their own data files, forms, `alert`, downloads) work fine sandboxed.
 
 What breaks in the sandbox (throws, or quietly does nothing):

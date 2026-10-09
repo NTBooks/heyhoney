@@ -22,6 +22,7 @@ tags:
   - r2
   - d1
   - claude-code-skill
+  - agent-skills
   - secret-links
   - expiring-links
   - self-hosted
