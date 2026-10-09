@@ -2,15 +2,15 @@
   "name": "heyhoney",
   "private": true,
   "type": "module",
-  "description": "Private sites behind secret, self-expiring links on heyhoney.nicktantillo.com",
+  "description": "Private sites behind secret, self-expiring links on your own subdomain",
   "bin": {
     "heyhoney": "bin/heyhoney.mjs"
   },
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "db:migrate": "wrangler d1 migrations apply heyhoney --remote",
-    "db:migrate:local": "wrangler d1 migrations apply heyhoney --local",
+    "dev": "node bin/heyhoney.mjs wrangler dev",
+    "deploy": "node bin/heyhoney.mjs wrangler deploy",
+    "db:migrate": "node bin/heyhoney.mjs wrangler d1 migrations apply heyhoney --remote",
+    "db:migrate:local": "node bin/heyhoney.mjs wrangler d1 migrations apply heyhoney --local",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

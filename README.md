@@ -1,5 +1,15 @@
 # Hey honey, look at this thing I made in Claude!
 
+- **Host small private HTML sites to share.** Pages, dashboards, mockups, little apps: anything Claude
+  makes as HTML, on your own website.
+- **See who opened it, and when.** Each person gets their own secret link with their name on it, so you
+  can tell that Neal opened his on Tuesday and Sam hasn't yet.
+- **Links expire on their own.** Nothing to remember to take down.
+- **More control than Claude's artifact hosting.** One link per person, revoke any one of them, add a
+  passcode, update the page without breaking the links people already have.
+- **Less exposure to other people's pages.** Only your own sites live on your domain, so you're not sharing a
+  host with pages other Claude users made, or with any malware in them.
+
 **heyhoney** lets you show the stuff you make with Claude to the people in your life, without making it
 public and without making anybody sign up for anything.
 
@@ -155,15 +165,17 @@ You need a Cloudflare account (the free tier is plenty) with a domain on it, and
 git clone https://github.com/NTBooks/heyhoney && cd heyhoney
 npm install
 npx wrangler login
-npx wrangler d1 create heyhoney          # put the printed database_id in wrangler.jsonc
+npx wrangler d1 create heyhoney          # note the printed database_id
 npx wrangler r2 bucket create heyhoney
 ```
 
-Edit `wrangler.jsonc`: set `routes[0].pattern` to your subdomain and `database_id` to yours. Then:
+Copy `wrangler.jsonc` to `wrangler.local.jsonc` (git-ignored, so your domain stays out of any fork you push) and
+set `routes[0].pattern` to your subdomain and `database_id` to yours. The CLI and npm scripts use the local file.
+Then:
 
 ```bash
 npm run db:migrate
-npx wrangler deploy
+npm run deploy
 ```
 
 Keep your content out of this repo. Make a private repo for it and point the CLI at its `sites/` folder:

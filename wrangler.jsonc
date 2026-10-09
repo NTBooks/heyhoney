@@ -1,4 +1,6 @@
 {
+  // Template. Copy to wrangler.local.jsonc (git-ignored), put your subdomain and D1 database id there,
+  // and the CLI and npm scripts will use it instead of this file.
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "heyhoney",
   "main": "src/index.ts",
@@ -6,9 +8,9 @@
   // Only the custom domain answers. No workers.dev or preview hostnames to leak or index.
   "workers_dev": false,
   "preview_urls": false,
-  "routes": [{ "pattern": "heyhoney.nicktantillo.com", "custom_domain": true }],
+  "routes": [{ "pattern": "heyhoney.example.com", "custom_domain": true }],
   "d1_databases": [
-    { "binding": "DB", "database_name": "heyhoney", "database_id": "82980e52-44f0-462b-a8ee-ac0b4294595d", "migrations_dir": "migrations" }
+    { "binding": "DB", "database_name": "heyhoney", "database_id": "<from: npx wrangler d1 create heyhoney>", "migrations_dir": "migrations" }
   ],
   "r2_buckets": [{ "binding": "FILES", "bucket_name": "heyhoney" }],
   "vars": {

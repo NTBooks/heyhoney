@@ -4,5 +4,6 @@ node_modules/
 
 # Your content lives in its own private repo, not here (see README).
 heyhoney.local.json
+wrangler.local.jsonc
 sites/
 INDEX.md

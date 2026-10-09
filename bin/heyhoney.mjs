@@ -2,7 +2,7 @@
 // heyhoney CLI. Sites live in <sites dir>/<slug>/ (keep that folder in its own private repo; it is the
 // archive); this mirrors them to R2 + D1 through wrangler and mints secret links. Run `node bin/heyhoney.mjs help`.
 
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { createHash, randomBytes, randomInt } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -12,9 +12,18 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const WRANGLER = path.join(ROOT, "node_modules", "wrangler", "bin", "wrangler.js");
 
-// Deployment facts come from wrangler.jsonc so there is one place to change them.
+// Deployment facts come from the wrangler config so there is one place to change them. wrangler.jsonc in
+// the repo is a template; your real one (domain, database id) is wrangler.local.jsonc, which git ignores.
+const CONFIG = ["wrangler.local.jsonc", "wrangler.jsonc"].map((f) => path.join(ROOT, f)).find((f) => fs.existsSync(f));
+
+// `heyhoney wrangler <args>` runs wrangler against that config (npm run dev / deploy / db:migrate use it).
+if (process.argv[2] === "wrangler") {
+  const r = spawnSync(process.execPath, [WRANGLER, ...process.argv.slice(3), "--config", CONFIG], { cwd: ROOT, stdio: "inherit" });
+  process.exit(r.status ?? 1);
+}
+
 const WCONF = JSON.parse(
-  fs.readFileSync(path.join(ROOT, "wrangler.jsonc"), "utf8")
+  fs.readFileSync(CONFIG, "utf8")
     .replace(/("(?:\\.|[^"\\])*")|\/\/[^\n]*|\/\*[\s\S]*?\*\//g, (m, str) => str ?? "")
     .replace(/,(\s*[}\]])/g, "$1"),
 );
@@ -73,7 +82,7 @@ const where = LOCAL ? "--local" : "--remote";
 
 function wrangler(args) {
   return new Promise((resolve, reject) => {
-    execFile(process.execPath, [WRANGLER, ...args], { cwd: ROOT, maxBuffer: 64 << 20, env: { ...process.env, CI: "1" } },
+    execFile(process.execPath, [WRANGLER, ...args, "--config", CONFIG], { cwd: ROOT, maxBuffer: 64 << 20, env: { ...process.env, CI: "1" } },
       (err, stdout, stderr) => (err ? reject(new Error(`wrangler ${args.slice(0, 3).join(" ")} failed:\n${stderr || stdout || err.message}`)) : resolve(stdout)));
   });
 }
