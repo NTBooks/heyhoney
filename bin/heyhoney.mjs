@@ -37,9 +37,21 @@ const LOCAL_CONF = path.join(ROOT, "heyhoney.local.json");
 const SITES = path.resolve(ROOT, process.env.HEYHONEY_SITES
   ?? (fs.existsSync(LOCAL_CONF) ? JSON.parse(fs.readFileSync(LOCAL_CONF, "utf8")).sites : undefined)
   ?? "sites");
+// Ephemeral sites live next door in "ephemeral/", which the sites repo git-ignores: they never enter git,
+// so they leave no history behind and a fresh clone can't bring back one that already self-destructed.
+const EPHEMERAL = path.join(SITES, "..", "ephemeral");
+const siteDir = (slug, ephemeral) => path.join(ephemeral ? EPHEMERAL : SITES, slug);
+const findDir = (slug) => [SITES, EPHEMERAL].map((r) => path.join(r, slug)).find((d) => fs.existsSync(path.join(d, "site.json")));
+const shown = (dir) => path.relative(path.resolve(SITES, ".."), dir).split(path.sep).join("/");
 const UNOPENED_TTL_DAYS = 30; // the Worker owns the other half: OPENED_TTL_DAYS in wrangler.jsonc
 const DAY = 86_400_000;
 const SLUG = /^[a-z0-9][a-z0-9-]{0,62}$/;
+const MAX_UPLOAD = 300 * 2 ** 20; // wrangler r2 object put refuses larger files
+// Kept out of git by the sites repo's .gitignore (it would bloat history forever); R2 holds the copy.
+const MEDIA = /\.(?:mp4|mov|webm|mkv|m4v|mp3|m4a|wav|flac|ogg)$/i;
+const keptMedia = (local, remote) =>
+  Object.fromEntries(Object.entries(remote).filter(([p]) => MEDIA.test(p) && !(p in local)));
+const mb = (bytes) => `${(bytes / 2 ** 20).toFixed(bytes < 10 * 2 ** 20 ? 1 : 0)} MB`;
 
 const TYPES = {
   ".html": "text/html; charset=utf-8", ".htm": "text/html; charset=utf-8",
@@ -60,7 +72,7 @@ const TYPES = {
 const argv = process.argv.slice(2);
 // --key value, --key=value, or a bare switch. Switches never swallow the next word, so
 // `link deck --pin sam` is a pinned link labelled "sam"; a chosen pin is `--pin=4821`.
-const SWITCHES = new Set(["pin", "local", "json", "force", "sandbox", "no-sandbox"]);
+const SWITCHES = new Set(["pin", "local", "json", "force", "sandbox", "no-sandbox", "ephemeral", "keep", "drop-media"]);
 const flags = {};
 const pos = [];
 for (let i = 0; i < argv.length; i++) {
@@ -114,20 +126,24 @@ function walk(dir, base = dir) {
 }
 
 function readSite(slug) {
-  const dir = path.join(SITES, slug);
+  const dir = findDir(slug);
+  if (!dir) die(`No site "${slug}" (looked in ${SITES} and ${EPHEMERAL}).`);
   const metaPath = path.join(dir, "site.json");
-  if (!fs.existsSync(metaPath)) die(`No site "${slug}" (expected ${metaPath}).`);
   const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
   const files = {};
   for (const rel of walk(dir)) files[rel] = createHash("sha256").update(fs.readFileSync(path.join(dir, rel))).digest("hex");
   const entry = meta.entry ?? (files["index.html"] ? "index.html" : Object.keys(files)[0]);
   if (!entry || !files[entry]) die(`Site "${slug}" has no entry file (${entry ?? "nothing to serve"}).`);
-  return { dir, meta: { name: meta.name ?? slug, description: meta.description ?? "", entry, sandbox: meta.sandbox !== false }, files };
+  return {
+    dir,
+    meta: { name: meta.name ?? slug, description: meta.description ?? "", entry, sandbox: meta.sandbox !== false, ephemeral: meta.ephemeral === true },
+    files,
+  };
 }
 
 function allSites() {
-  if (!fs.existsSync(SITES)) return [];
-  return fs.readdirSync(SITES).filter((s) => fs.existsSync(path.join(SITES, s, "site.json"))).sort();
+  const inRoot = (root) => (fs.existsSync(root) ? fs.readdirSync(root).filter((s) => fs.existsSync(path.join(root, s, "site.json"))) : []);
+  return [...new Set([...inRoot(SITES), ...inRoot(EPHEMERAL)])].sort();
 }
 
 // ---- commands ---------------------------------------------------------------------------------
@@ -138,11 +154,15 @@ function add(src, slug) {
   if (!SLUG.test(slug)) die(`Slug must match ${SLUG}.`);
   const from = path.resolve(src);
   if (!fs.existsSync(from)) die(`Not found: ${src}`);
-  const dir = path.join(SITES, slug);
+  const oldDir = findDir(slug);
+  const old = oldDir ? JSON.parse(fs.readFileSync(path.join(oldDir, "site.json"), "utf8")) : {};
+  const ephemeral = (flags.ephemeral ? true : flags.keep ? false : old.ephemeral) === true;
+  const dir = siteDir(slug, ephemeral);
   const metaPath = path.join(dir, "site.json");
-  const old = fs.existsSync(metaPath) ? JSON.parse(fs.readFileSync(metaPath, "utf8")) : {};
 
-  // Replace content wholesale so files deleted upstream are deleted here too.
+  // Replace content wholesale so files deleted upstream are deleted here too (and a site that changed
+  // between kept and ephemeral moves folders).
+  if (oldDir) fs.rmSync(oldDir, { recursive: true, force: true });
   fs.rmSync(dir, { recursive: true, force: true });
   fs.mkdirSync(dir, { recursive: true });
   let entry;
@@ -162,11 +182,13 @@ function add(src, slug) {
     ...(entry && entry !== "index.html" ? { entry } : {}),
     // Sandboxed unless told otherwise; an existing site keeps its setting across re-adds.
     ...((flags["no-sandbox"] ? false : flags.sandbox ? true : old.sandbox) === false ? { sandbox: false } : {}),
+    // Kept unless told otherwise; --ephemeral makes it self-destruct once its last link dies.
+    ...(ephemeral ? { ephemeral: true } : {}),
   };
   fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2) + "\n");
   writeIndex();
   const n = walk(dir).length;
-  console.log(`Added ${path.basename(SITES)}/${slug}/ (${n} file${n === 1 ? "" : "s"}).`);
+  console.log(`Added ${shown(dir)}/ (${n} file${n === 1 ? "" : "s"})${ephemeral ? ", ephemeral: not in git, self-destructs after its last link" : ""}.`);
 }
 
 // Mirror sites/<slug>/ to R2 (changed files only) and upsert its D1 row.
@@ -175,8 +197,19 @@ async function publish(slug) {
   const site = readSite(slug);
   const [row] = await sql(`SELECT files FROM sites WHERE slug = ${q(slug)}`);
   const remote = row ? JSON.parse(row.files) : {};
-  const changed = Object.keys(site.files).filter((p) => remote[p] !== site.files[p] || flags.force);
+  // Media is git-ignored in the sites repo, so a fresh clone won't have it. Treat media that's live but
+  // missing here as kept, not removed, unless --drop-media says the deletion is on purpose.
+  const kept = flags["drop-media"] ? {} : keptMedia(site.files, remote);
+  if (Object.keys(kept).length) console.log(`  keeping on Cloudflare (not in this folder): ${Object.keys(kept).join(", ")}  (--drop-media to delete)`);
+  site.files = { ...site.files, ...kept };
+  const changed = Object.keys(site.files).filter((p) => !(p in kept) && (remote[p] !== site.files[p] || flags.force));
   const removed = Object.keys(remote).filter((p) => !(p in site.files));
+
+  const size = (rel) => fs.statSync(path.join(site.dir, rel)).size;
+  const tooBig = changed.filter((rel) => size(rel) > MAX_UPLOAD);
+  if (tooBig.length) die(`Too big for a wrangler upload (${mb(MAX_UPLOAD)} max): ${tooBig.map((r) => `${r} ${mb(size(r))}`).join(", ")}. Re-encode it smaller.`);
+  const upBytes = changed.reduce((n, rel) => n + size(rel), 0);
+  if (upBytes > 20 * 2 ** 20) console.log(`  uploading ${mb(upBytes)}...`);
 
   await pool(changed, LOCAL ? 1 : 4, async (rel) => {
     const type = TYPES[path.extname(rel).toLowerCase()] ?? "application/octet-stream";
@@ -185,11 +218,11 @@ async function publish(slug) {
   });
 
   const now = Date.now();
-  await sql(`INSERT INTO sites (slug, name, description, entry, files, sandbox, created_at, updated_at)
+  await sql(`INSERT INTO sites (slug, name, description, entry, files, sandbox, ephemeral, created_at, updated_at)
     VALUES (${q(slug)}, ${q(site.meta.name)}, ${q(site.meta.description)}, ${q(site.meta.entry)}, ${q(JSON.stringify(site.files))},
-      ${site.meta.sandbox ? 1 : 0}, ${now}, ${now})
+      ${site.meta.sandbox ? 1 : 0}, ${site.meta.ephemeral ? 1 : 0}, ${now}, ${now})
     ON CONFLICT(slug) DO UPDATE SET name = excluded.name, description = excluded.description, entry = excluded.entry,
-      files = excluded.files, sandbox = excluded.sandbox, updated_at = excluded.updated_at`);
+      files = excluded.files, sandbox = excluded.sandbox, ephemeral = excluded.ephemeral, updated_at = excluded.updated_at`);
 
   // Delete only after the row stops naming them, so a live link never points at a missing file.
   await pool(removed, LOCAL ? 1 : 4, async (rel) => {
@@ -238,8 +271,9 @@ function sandboxReport(slug, site) {
 // Turn a site's sandbox on or off: site.json, plus the live row if it is published.
 async function setSandbox(slug, value) {
   if (!slug || !["on", "off"].includes(value)) die("usage: sandbox <slug> on|off");
-  const metaPath = path.join(SITES, slug, "site.json");
-  if (!fs.existsSync(metaPath)) die(`No site "${slug}".`);
+  const dir = findDir(slug);
+  if (!dir) die(`No site "${slug}".`);
+  const metaPath = path.join(dir, "site.json");
   const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
   if (value === "on") delete meta.sandbox;
   else meta.sandbox = false;
@@ -315,7 +349,7 @@ async function revoke(target) {
 // The index: every site in the repo, whether it is published, and its live links.
 async function list() {
   const local = allSites().map((slug) => ({ slug, ...readSite(slug).meta }));
-  const remote = Object.fromEntries((await sql(`SELECT slug, updated_at, files, sandbox FROM sites`)).map((r) => [r.slug, r]));
+  const remote = Object.fromEntries((await sql(`SELECT slug, updated_at, files, sandbox, ephemeral FROM sites`)).map((r) => [r.slug, r]));
   const now = Date.now();
   const live = await sql(`SELECT site_slug, COUNT(*) AS n, MAX(expires_at) AS until FROM links
     WHERE revoked_at IS NULL AND expires_at > ${now} GROUP BY site_slug`);
@@ -325,10 +359,21 @@ async function list() {
   const out = slugs.map((slug) => {
     const l = local.find((s) => s.slug === slug);
     const r = remote[slug];
-    let state = "draft";
+    // An ephemeral site that isn't on Cloudflare has usually self-destructed: "gone" (publish revives it,
+    // prune deletes the local copy). It could also be one never published; the remedy is the same.
+    let state = l?.ephemeral ? "gone" : "draft";
     if (r && !l) state = "orphan"; // in R2/D1 but deleted from the repo
-    else if (r) state = JSON.stringify(readSite(slug).files) === r.files && Number(l.sandbox) === r.sandbox ? "published" : "stale";
+    else if (r) {
+      const localFiles = readSite(slug).files;
+      const remoteFiles = JSON.parse(r.files);
+      const merged = { ...localFiles, ...keptMedia(localFiles, remoteFiles) };
+      const sameFiles = Object.keys(merged).length === Object.keys(remoteFiles).length
+        && Object.entries(merged).every(([p, h]) => remoteFiles[p] === h);
+      const same = sameFiles && Number(l.sandbox) === r.sandbox && Number(l.ephemeral) === r.ephemeral;
+      state = same ? "published" : "stale";
+    }
     return { slug, name: l?.name ?? "", description: l?.description ?? "", state, sandbox: l ? l.sandbox : r.sandbox === 1,
+      ephemeral: l ? l.ephemeral : r.ephemeral === 1,
       updated_at: r ? new Date(r.updated_at).toISOString() : null,
       live_links: liveBy[slug]?.n ?? 0, live_until: liveBy[slug] ? new Date(liveBy[slug].until).toISOString() : null };
   });
@@ -336,8 +381,46 @@ async function list() {
   if (!out.length) return console.log("No sites yet.");
   for (const s of out) {
     const lk = s.live_links ? `${s.live_links} live link(s) to ${fmt(Date.parse(s.live_until))}` : "no live links";
-    console.log(`${s.slug.padEnd(28)} ${s.state.padEnd(10)} ${lk.padEnd(36)} ${s.name}${s.sandbox ? "" : "  [unsandboxed]"}`);
+    const tags = `${s.ephemeral ? "  [ephemeral]" : ""}${s.sandbox ? "" : "  [unsandboxed]"}`;
+    console.log(`${s.slug.padEnd(28)} ${s.state.padEnd(10)} ${lk.padEnd(36)} ${s.name}${tags}`);
   }
+}
+
+// Make a site self-destruct once its last link dies (on), or keep it for good (off).
+async function setEphemeral(slug, value) {
+  if (!slug || !["on", "off"].includes(value)) die("usage: ephemeral <slug> on|off");
+  const dir = findDir(slug);
+  if (!dir) die(`No site "${slug}".`);
+  const metaPath = path.join(dir, "site.json");
+  const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+  if (value === "on") meta.ephemeral = true;
+  else delete meta.ephemeral;
+  fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2) + "\n");
+  // Ephemeral sites live in the git-ignored folder, kept ones in the tracked one.
+  const to = siteDir(slug, value === "on");
+  if (to !== dir) {
+    fs.mkdirSync(path.dirname(to), { recursive: true });
+    fs.renameSync(dir, to);
+  }
+  writeIndex();
+  const [row] = await sql(`SELECT slug FROM sites WHERE slug = ${q(slug)}`);
+  if (row) await sql(`UPDATE sites SET ephemeral = ${value === "on" ? 1 : 0} WHERE slug = ${q(slug)}`);
+  console.log(value === "on"
+    ? `${slug} is ephemeral: moved to ${shown(to)}/ (not in git; commit the sites repo to drop it from the tree, though old commits keep it), and it deletes itself from Cloudflare the day after its last link expires or is revoked.`
+    : `${slug} is kept: moved to ${shown(to)}/ (commit the sites repo to track it), and it stays on Cloudflare after its links die.`);
+}
+
+// Delete the local folders of ephemeral sites that have self-destructed on Cloudflare.
+async function prune() {
+  const remote = new Set((await sql(`SELECT slug FROM sites`)).map((r) => r.slug));
+  const gone = allSites().filter((slug) => readSite(slug).meta.ephemeral && !remote.has(slug));
+  if (!gone.length) return console.log("Nothing to prune.");
+  for (const slug of gone) {
+    fs.rmSync(findDir(slug), { recursive: true, force: true });
+    console.log(`  ✕ ephemeral/${slug}/`);
+  }
+  writeIndex();
+  console.log(`Pruned ${gone.length} self-destructed site(s). Commit the sites repo to record it.`);
 }
 
 // Take a site down: delete its R2 objects and D1 rows (its links die with it). Repo files stay.
@@ -347,18 +430,18 @@ async function unpublish(slug) {
   if (!row) die(`"${slug}" is not published.`);
   await sql(`DELETE FROM links WHERE site_slug = ${q(slug)}; DELETE FROM sites WHERE slug = ${q(slug)}`);
   await pool(Object.keys(JSON.parse(row.files)), LOCAL ? 1 : 4, (rel) => wrangler(["r2", "object", "delete", `${BUCKET}/${slug}/${rel}`, where]));
-  console.log(`Unpublished ${slug}; its links are dead. ${path.join(SITES, slug)} is untouched.`);
+  console.log(`Unpublished ${slug}; its links are dead. ${findDir(slug)} is untouched.`);
 }
 
 // INDEX.md, next to the sites folder: a human- and Claude-readable catalog of every site, regenerated on add.
 function writeIndex() {
   const rows = allSites().map((slug) => {
     const s = readSite(slug);
-    return `| [${slug}](${path.basename(SITES)}/${slug}/${s.meta.entry}) | ${s.meta.name} | ${s.meta.description.replace(/\|/g, "\\|")} | ${Object.keys(s.files).length} | ${s.meta.sandbox ? "yes" : "**no**"} |`;
+    return `| [${slug}](${shown(s.dir)}/${s.meta.entry}) | ${s.meta.name} | ${s.meta.description.replace(/\|/g, "\\|")} | ${Object.keys(s.files).length} | ${s.meta.sandbox ? "yes" : "**no**"} | ${s.meta.ephemeral ? "yes" : ""} |`;
   });
   fs.writeFileSync(path.join(SITES, "..", "INDEX.md"),
     `# Sites\n\nGenerated by \`heyhoney add\`. Live link state is not here (it changes on its own); run \`heyhoney list\`.\n\n` +
-    `| Slug | Name | Description | Files | Sandboxed |\n|---|---|---|---|---|\n${rows.join("\n")}\n`);
+    `| Slug | Name | Description | Files | Sandboxed | Ephemeral |\n|---|---|---|---|---|---|\n${rows.join("\n")}\n`);
 }
 
 // Copy skill/SKILL.md into ~/.claude/skills/heyhoney/ with this machine's paths and host filled in.
@@ -416,10 +499,10 @@ function die(msg) {
 
 const HELP = `heyhoney: private sites behind secret, self-expiring links  (add --local to target wrangler dev)
 
-  push <file|dir> <slug> [--name N] [--desc D] [--label L] [--pin]   add + publish + link, the usual one-shot
-  add <file|dir> <slug> [--name N] [--desc D] [--entry F] [--no-sandbox]
+  push <file|dir> <slug> [--name N] [--desc D] [--label L] [--pin] [--ephemeral]   add + publish + link, the usual one-shot
+  add <file|dir> <slug> [--name N] [--desc D] [--entry F] [--no-sandbox] [--ephemeral | --keep]
                                                              copy into <sites>/<slug>/ (lone .html becomes index.html)
-  publish <slug> [--force]                                   mirror <sites>/<slug>/ to Cloudflare (changed files only)
+  publish <slug> [--force] [--drop-media]                    mirror <sites>/<slug>/ to Cloudflare (changed files only)
   link <slug> [label] [--pin | --pin=CODE] [--json]          mint a new secret link (30d unopened / 7d after first open);
                                                              --pin adds a code to type (10 wrong tries kill the link)
   links [slug] [--json]                                      every link and its state
@@ -428,6 +511,8 @@ const HELP = `heyhoney: private sites behind secret, self-expiring links  (add -
   unpublish <slug>                                           delete from Cloudflare (local copy stays)
   index                                                      rewrite INDEX.md
   sandbox <slug> on|off                                      isolate the site's scripts (default on; off only for trusted code)
+  ephemeral <slug> on|off                                    self-destruct the site once its last link dies (default off)
+  prune                                                      delete local copies of ephemeral sites that self-destructed
   install-skill [--for claude,agents,antigravity]            install the skill for your AI coding tools, filled in for this machine
 
   sites: ${SITES}
@@ -451,6 +536,8 @@ try {
     case "index": writeIndex(); console.log("INDEX.md rewritten."); break;
     case "install-skill": installSkill(); break;
     case "sandbox": await setSandbox(a, b); break;
+    case "ephemeral": await setEphemeral(a, b); break;
+    case "prune": await prune(); break;
     default: console.log(HELP);
   }
 } catch (e) {

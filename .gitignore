@@ -6,4 +6,5 @@ node_modules/
 heyhoney.local.json
 wrangler.local.jsonc
 sites/
+ephemeral/
 INDEX.md

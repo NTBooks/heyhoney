@@ -135,9 +135,12 @@ export default {
     return serveFile(request, env, link, rest, DIRECT_HEADERS);
   },
 
-  // Daily: drop link rows that died long ago. Sites are never removed here; they outlive their links.
+  // Daily: self-destruct ephemeral sites whose links are all dead, then drop link rows that died long ago.
+  // Ordinary sites are never removed here; they outlive their links.
   async scheduled(_event: ScheduledController, env: Env): Promise<void> {
-    const cutoff = Date.now() - Number(env.PRUNE_AFTER_DAYS) * DAY;
+    const now = Date.now();
+    await expireEphemeral(env, now);
+    const cutoff = now - Number(env.PRUNE_AFTER_DAYS) * DAY;
     await env.DB.prepare(
       `DELETE FROM links WHERE expires_at < ?1 OR (revoked_at IS NOT NULL AND revoked_at < ?1)`,
     )
@@ -145,6 +148,34 @@ export default {
       .run();
   },
 } satisfies ExportedHandler<Env>;
+
+// An ephemeral site goes once no link to it is live. The one-day grace keeps a site that was just
+// published, and hasn't had its first link minted yet, from vanishing under the CLI.
+async function expireEphemeral(env: Env, now: number): Promise<void> {
+  const { results } = await env.DB.prepare(
+    `SELECT s.slug FROM sites s
+      WHERE s.ephemeral = 1 AND s.updated_at < ?1
+        AND NOT EXISTS (SELECT 1 FROM links l
+                         WHERE l.site_slug = s.slug AND l.revoked_at IS NULL AND l.expires_at > ?2)`,
+  )
+    .bind(now - DAY, now)
+    .all<{ slug: string }>();
+
+  for (const { slug } of results) {
+    // Files first: if this dies halfway, the row is still there and tomorrow's run finishes the job.
+    let cursor: string | undefined;
+    do {
+      const page = await env.FILES.list({ prefix: `${slug}/`, cursor });
+      if (page.objects.length) await env.FILES.delete(page.objects.map((o) => o.key));
+      cursor = page.truncated ? page.cursor : undefined;
+    } while (cursor);
+    await env.DB.batch([
+      env.DB.prepare(`DELETE FROM links WHERE site_slug = ?`).bind(slug),
+      env.DB.prepare(`DELETE FROM sites WHERE slug = ?`).bind(slug),
+    ]);
+    console.log(`heyhoney: ephemeral site ${slug} self-destructed`);
+  }
+}
 
 async function serveFile(request: Request, env: Env, link: LinkRow, rawPath: string, base: Record<string, string>): Promise<Response> {
   let path: string;

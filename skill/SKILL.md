@@ -60,6 +60,8 @@ The user's private alternative to Artifacts, served from `{{URL}}`.
 | A link that also needs a code | `hh link <slug> "label" --pin` (or `--pin=4821` to choose; works on `push` too) |
 | Kill one link / every link to a site | `hh revoke <link-id>` / `hh revoke <slug>` |
 | Turn a site's sandbox off / back on | `hh sandbox <slug> off` / `hh sandbox <slug> on` (live at once, links kept) |
+| Make a site self-destruct / keep it | `hh ephemeral <slug> on` / `off` (or `--ephemeral` on `push`/`add`) |
+| Clean up local copies of self-destructed sites | `hh prune`, then commit the sites repo |
 | Take a site offline entirely | `hh unpublish <slug>` (the local copy stays; `git rm` it too if they want it gone) |
 
 `hh list` states: `published` (Cloudflare matches the folder), `stale` (folder changed since the last publish,
@@ -76,6 +78,28 @@ user asks for a code or passcode, or when the content is something they'd mind b
 health, private documents, anything with an address in it). The pin is printed once, next to the URL. Show both,
 and tell the user to send the pin another way than the link. Ten wrong codes revoke the link; `hh links` shows
 wrong tries. If a recipient locks themselves out, mint a fresh pinned link.
+
+## Ephemeral sites and video
+
+Sites are kept by default. An **ephemeral** site self-destructs instead: the day after its last link expires or
+is revoked, the Worker deletes its files and its catalog entry. It also never enters git, because it lives in
+`{{SITES_REPO}}/ephemeral/<slug>/`, which is ignored, so a fresh clone can't bring it back.
+
+Use `--ephemeral` when:
+- the user says temporary, one-off, self-destruct, "just for tonight", or similar;
+- the site carries big media (video, audio, anything over about 20 MB), unless they say they want to keep it.
+  Tell them you made it ephemeral and that `hh ephemeral <slug> off` keeps it.
+
+Video and audio (`.mp4 .mov .webm .mkv .m4v .mp3 .m4a .wav .flac .ogg`) are git-ignored even on kept sites. They
+live on disk and in R2, not in git history, so re-exporting a video doesn't grow the repo. `publish` won't
+delete live media that's missing from the folder (a fresh clone has none). Pass `--drop-media` to delete it on
+purpose. Files over 300 MB can't be uploaded through wrangler, so re-encode them first.
+
+For video in a page: bundle the file and use `<video src="clip.mp4" controls>`. Start playback from the
+user's click (call `play()` inside the click handler). YouTube embeds don't load in the sandbox.
+
+`hh list` shows `[ephemeral]`, and `gone` for an ephemeral site that has self-destructed (`publish` brings it
+back while the local copy exists; `prune` deletes the local copy).
 
 ## Sandbox
 

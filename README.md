@@ -47,6 +47,8 @@ flowchart LR
 - **One link per person.** Send the same page to three people and each gets their own link. You can see who
   opened theirs and shut off any one without touching the others.
 - **Pages stick around, links don't.** Want to show it again next month? Ask for a fresh link.
+- **Or let the whole thing self-destruct.** Mark a share *ephemeral* (good for videos and one-offs) and once
+  its last link dies, the page and its files delete themselves. They never touch your git history either.
 - **Optional code for sensitive things.** Add a 6-digit code that you send separately, so a forwarded link
   alone isn't enough.
 - **Pages can't touch your domain.** Every page runs in a sandbox, so its code can't read your cookies or
@@ -142,7 +144,8 @@ flowchart LR
   no `workers.dev` or preview hostname.
 - **Updates keep links.** `publish` uploads only changed files and deletes removed ones. Everyone holding a
   link sees the new version.
-- **Cron** (daily) drops link rows that have been dead for 60 days. Sites are never deleted automatically.
+- **Cron** (daily) deletes ephemeral sites whose links are all dead, and drops link rows that have been dead
+  for 60 days. Kept sites are never deleted automatically.
 
 ![What an expired link shows](slopscore-3.png)
 
@@ -165,6 +168,28 @@ doesn't let it.
   mic and location. `publish` scans each site for these and prints a warning. The skill tells Claude to fix
   the page first (a `try/catch` fallback is usually enough), and to explain the risk and ask you before ever
   running `heyhoney sandbox <slug> off`. Unsandboxed sites are flagged in `list` and `INDEX.md`.
+
+### Ephemeral sites and video
+
+Sites are kept by default; only their links expire. An **ephemeral** site goes too:
+
+```bash
+node bin/heyhoney.mjs push ./trip-video trip-video --label sam --ephemeral
+node bin/heyhoney.mjs ephemeral <slug> on|off     # change your mind later
+node bin/heyhoney.mjs prune                       # delete local copies of sites that self-destructed
+```
+
+- **Self-destruct.** Once a day the Worker deletes every ephemeral site with no live link left (all expired or
+  revoked) and its files from R2. A site published in the last 24 hours is spared, so it can't vanish before
+  its first link is made. In practice a share is gone 7 to 37 days after you send it.
+- **Never in git.** Ephemeral sites live in `ephemeral/` in your sites repo, which is git-ignored. Nothing
+  lands in history, and a fresh clone can't bring back something that already self-destructed.
+- **Video stays out of git anyway.** Video and audio files are git-ignored even on kept sites, because git
+  keeps every version forever and a few re-exported videos would bloat the repo for good. The files live on
+  disk and in R2. `publish` won't delete live media that a fresh clone doesn't have; `--drop-media` does it
+  on purpose.
+- **What it costs.** R2's free tier is 10 GB and viewing is always free, so a 50 MB video uses half a percent
+  of it. Files over 300 MB need re-encoding first, because that's wrangler's upload limit.
 
 ### Codes (pins), for the odd sensitive share
 
@@ -226,6 +251,8 @@ node bin/heyhoney.mjs links [slug]         # every link: unopened, opened, expir
 node bin/heyhoney.mjs revoke <link-id|slug>
 node bin/heyhoney.mjs publish <slug>       # after editing a site folder (changed files only)
 node bin/heyhoney.mjs sandbox <slug> on|off  # isolation is on by default; off only for trusted code
+node bin/heyhoney.mjs ephemeral <slug> on|off  # self-destruct once the last link dies (default off)
+node bin/heyhoney.mjs prune                # remove local copies of self-destructed sites
 node bin/heyhoney.mjs unpublish <slug>
 ```
 
