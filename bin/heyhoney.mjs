@@ -100,7 +100,21 @@ function wrangler(args) {
 }
 
 async function sql(command) {
-  const out = await wrangler(["d1", "execute", DB, where, "--json", "-y", "--command", command]);
+  // A big statement (a site with thousands of files) overflows the Windows command-line limit (about 32k chars),
+  // which fails as "spawn ENAMETOOLONG". Those go through a temp .sql file instead. Note: with --remote --file,
+  // wrangler returns summary stats, not rows, so this path is only for writes (the long ones store a site's file list).
+  let out;
+  if (command.length > 6000) {
+    const f = path.join(os.tmpdir(), `heyhoney-${process.pid}-${Date.now()}.sql`);
+    fs.writeFileSync(f, command);
+    try {
+      out = await wrangler(["d1", "execute", DB, where, "--json", "-y", "--file", f]);
+    } finally {
+      fs.rmSync(f, { force: true });
+    }
+  } else {
+    out = await wrangler(["d1", "execute", DB, where, "--json", "-y", "--command", command]);
+  }
   const parsed = JSON.parse(out.slice(out.indexOf("[")));
   return parsed.flatMap((r) => r.results ?? []);
 }
@@ -167,7 +181,15 @@ function add(src, slug) {
   fs.mkdirSync(dir, { recursive: true });
   let entry;
   if (fs.statSync(from).isDirectory()) {
-    fs.cpSync(from, dir, { recursive: true, filter: (p) => !/(^|[\\/])(\.git|node_modules)([\\/]|$)/.test(p) });
+    const skipped = new Set();
+    fs.cpSync(from, dir, { recursive: true, filter: (p) => {
+      const m = p.match(/(^|[\\/])(\.git|node_modules)([\\/]|$)/);
+      if (m && m[2] === "node_modules") skipped.add(path.relative(from, p.slice(0, m.index + m[1].length + m[2].length)) || "node_modules");
+      return !m;
+    } });
+    // Pages that import from node_modules/ (ES modules, import maps) 404 once hosted, and in a sandboxed frame that
+    // 404 surfaces as a CORS error, which hides the real cause. So say so here.
+    for (const s of skipped) console.warn(`  ⚠ skipped ${s}/ (node_modules folders are never uploaded). If the page loads files from it, copy them to e.g. lib/ and point the page there.`);
     fs.rmSync(path.join(dir, "site.json"), { force: true });
     entry = flags.entry ?? old.entry;
   } else {
