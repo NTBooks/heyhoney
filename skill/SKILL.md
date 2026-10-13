@@ -24,6 +24,11 @@ The user's private alternative to Artifacts, served from `{{URL}}`.
   for, is best.
 - Only the token's hash is stored. **The URL is printed once, at mint time.** Give it to the user right away.
   If they lose it, mint another; never try to recover one.
+- Every mint prints **two links**: `send:` (the one for the recipient) and `stealth:` (the same URL plus
+  `?stealth=<link id>`, for the owner). Opening the stealth one never starts the clock or adds a view, so the
+  user, or you, can check the page without burning the recipient's link. **Always give the user both,
+  clearly marked**, so they never send the stealth one by mistake (a recipient using it would be invisible
+  in `hh links`). For older links, the stealth URL is the link plus `?stealth=<id>`, with the id from `hh links`.
 
 ## Pushing something new
 
@@ -46,14 +51,16 @@ The user's private alternative to Artifacts, served from `{{URL}}`.
 4. Commit the **sites** repo (never the tool repo, which is public):
    `git -C {{SITES_REPO}} add -A && git -C {{SITES_REPO}} commit -m "Add <slug>" && git -C {{SITES_REPO}} push`.
    Never commit a link URL (not in commit messages, `site.json`, or any file).
-5. Reply with the URL on its own line, who it is labelled for, and when it expires (and the pin, if any).
+5. Reply with both links, each on its own line and labelled: **Send** (the URL for the recipient) and
+   **Stealth (just for you; opens don't count)**. Add who it is labelled for, when it expires, and the pin,
+   if any. Do this for every link you mint, from `push` or `link`.
 
 ## Everything else
 
 | Want | Run |
 |---|---|
 | What's hosted, publish state, live links | `hh list` (add `--json` to read it programmatically) |
-| A fresh link for an existing site | `hh link <slug> "label"` |
+| A fresh link for an existing site | `hh link <slug> "label"` (prints send + stealth; give the user both) |
 | Every link and whether it was opened | `hh links [slug]` |
 | Update a site, keep its links | `hh add <file|dir> <slug>` then `hh publish <slug>`, then commit the sites repo |
 | Edit files in place | edit `{{SITES}}/<slug>/...` directly, then `hh publish <slug>`, then commit |
@@ -134,8 +141,9 @@ asks whether anything risky is hosted, that's where to look.
 - Link unfurlers (Slack, iMessage, Discord and the like) get a blank "A private link" stub and do not start the
   7-day clock, so it's safe to paste links into chat. Corporate mail scanners that use real browsers can still
   count as the first open.
-- To check a live site without starting its clock, fetch with a `sec-fetch-mode: no-cors` header. That counts
-  as a sub-resource load, not an open.
+- To check a live link yourself, open its stealth URL (`?stealth=<link id>`). The response header
+  `x-heyhoney-view: stealth, not counted` confirms it wasn't counted. A fetch with a
+  `sec-fetch-mode: no-cors` header also doesn't count: it looks like a sub-resource load, not an open.
 - Don't put secrets or credentials in a site. Anyone holding the link can read every file in it.
 - The tool repo is public. Site content, slugs, labels and links belong only in the sites repo.
 - `--local` on any command targets `wrangler dev` state at localhost:8787 for testing the Worker itself.

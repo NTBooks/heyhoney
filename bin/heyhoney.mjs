@@ -330,9 +330,12 @@ async function link(slug, label = "") {
   await sql(`INSERT INTO links (id, token_hash, site_slug, label, created_at, expires_at, pin_hash, unlock_key)
     VALUES (${q(id)}, ${q(sha(token))}, ${q(slug)}, ${q(label)}, ${now}, ${expires}, ${q(pinHash)}, ${q(unlockKey)})`);
   const url = `${BASE_URL}/s/${token}/`;
-  if (flags.json) console.log(JSON.stringify({ id, slug, label, url, ...(pin ? { pin } : {}), expires_if_unopened: new Date(expires).toISOString() }));
+  // The owner's copy: opens with ?stealth=<link id> are served but never start the clock or add a view.
+  const stealthUrl = `${url}?stealth=${id}`;
+  if (flags.json) console.log(JSON.stringify({ id, slug, label, url, stealth_url: stealthUrl, ...(pin ? { pin } : {}), expires_if_unopened: new Date(expires).toISOString() }));
   else {
-    console.log(`\n  ${url}\n`);
+    console.log(`\n  send:     ${url}`);
+    console.log(`  stealth:  ${stealthUrl}   (yours: opens never count)\n`);
     if (pin) console.log(`  pin  ${pin}   send it separately from the link (another app, or say it out loud)\n`);
     console.log(`  link ${id} for ${slug}${label ? ` (${label})` : ""}: dies ${fmt(expires)} if unopened, or 7 days after first open.`);
     console.log(`  This is the only time the URL${pin ? " and pin are" : " is"} shown; heyhoney stores just hashes.\n`);
@@ -525,7 +528,8 @@ const HELP = `heyhoney: private sites behind secret, self-expiring links  (add -
   add <file|dir> <slug> [--name N] [--desc D] [--entry F] [--no-sandbox] [--ephemeral | --keep]
                                                              copy into <sites>/<slug>/ (lone .html becomes index.html)
   publish <slug> [--force] [--drop-media]                    mirror <sites>/<slug>/ to Cloudflare (changed files only)
-  link <slug> [label] [--pin | --pin=CODE] [--json]          mint a new secret link (30d unopened / 7d after first open);
+  link <slug> [label] [--pin | --pin=CODE] [--json]          mint a new secret link (30d unopened / 7d after first open)
+                                                             and your stealth copy of it (?stealth=<id>: opens don't count);
                                                              --pin adds a code to type (10 wrong tries kill the link)
   links [slug] [--json]                                      every link and its state
   revoke <link-id | slug>                                    kill one link, or every link to a site

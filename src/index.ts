@@ -124,15 +124,26 @@ export default {
       return page(405, "Nope.");
     }
 
-    // A real person opening the site (a top-level GET of its entry, not a HEAD) counts as an access.
+    // A real person opening the site (a top-level GET of its entry, not a HEAD) counts as an access,
+    // unless it's the owner's stealth copy of the link: ?stealth=<link id>. The id is only ever shown
+    // to the owner (the CLI prints it), so a recipient can't make their own opens invisible.
+    const stealth = safeEqual(url.searchParams.get("stealth") ?? "", link.id);
     const isEntry = rest === "/" || rest === `/${link.entry}`;
-    if (isEntry && request.method === "GET") {
+    if (isEntry && request.method === "GET" && !stealth) {
       const mode = request.headers.get("sec-fetch-mode");
       if (!mode || mode === "navigate") await recordView(env, link, now);
     }
 
-    if (sandboxed) return frameWrapper(link, `/s/${token}/~${link.pin_hash ? link.unlock_key : ""}${rest}${url.search}`, request.method);
-    return serveFile(request, env, link, rest, DIRECT_HEADERS);
+    // The site itself never sees the stealth parameter.
+    const params = new URLSearchParams(url.search);
+    params.delete("stealth");
+    const search = params.size ? `?${params}` : "";
+    const res = sandboxed
+      ? frameWrapper(link, `/s/${token}/~${link.pin_hash ? link.unlock_key : ""}${rest}${search}`, request.method)
+      : await serveFile(request, env, link, rest, DIRECT_HEADERS);
+    // Lets the owner confirm (curl -I, devtools) that this open wasn't counted.
+    if (stealth) res.headers.set("x-heyhoney-view", "stealth, not counted");
+    return res;
   },
 
   // Daily: self-destruct ephemeral sites whose links are all dead, then drop link rows that died long ago.

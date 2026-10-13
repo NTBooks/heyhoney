@@ -137,6 +137,11 @@ flowchart LR
   holds no admin secret, so there's nothing to brute-force.
 - **The clock.** Minting sets `expires_at = now + 30d`. The first real open sets `expires_at = now + 7d`. A real
   open is a top-level GET of the site's entry page from a non-bot user agent.
+- **Your own opens don't count.** Every link comes with a stealth copy, the same URL plus
+  `?stealth=<link id>`, which the CLI prints next to it. Opening that one never starts the clock or adds a
+  view, so you can check the exact link you're about to send. The id is only ever shown to you, so a
+  recipient can't hide their own opens. The response carries `x-heyhoney-view: stealth, not counted`, and the
+  site never sees the parameter. Older links work too: add `?stealth=<id>` with the id from `links`.
 - **Link previews are safe.** Slack, iMessage, Discord and other unfurlers get a blank stub, so pasting a link
   into chat neither leaks the content nor starts the clock.
 - **Headers.** `Cache-Control: private, no-store`, `X-Robots-Tag: noindex`, and `Referrer-Policy: no-referrer`,
@@ -246,7 +251,7 @@ node bin/heyhoney.mjs install-skill     # installs the skill for Claude Code, Co
 ```
 node bin/heyhoney.mjs push <file|dir> <slug> --name "Title" --desc "What it is" --label "for whom"
 node bin/heyhoney.mjs list                 # the index: sites, publish state, live links
-node bin/heyhoney.mjs link <slug> "label"  # a fresh link for an existing site (add --pin for a code)
+node bin/heyhoney.mjs link <slug> "label"  # a fresh link + your stealth copy (add --pin for a code)
 node bin/heyhoney.mjs links [slug]         # every link: unopened, opened, expired, revoked, views
 node bin/heyhoney.mjs revoke <link-id|slug>
 node bin/heyhoney.mjs publish <slug>       # after editing a site folder (changed files only)
