@@ -103,7 +103,7 @@ delete live media that's missing from the folder (a fresh clone has none). Pass 
 purpose. Files over 300 MB can't be uploaded through wrangler, so re-encode them first.
 
 For video in a page: bundle the file and use the **video page template below**, never a bare `<video>` tag.
-A plain player can't go full screen on an iPhone from inside the sandboxed frame (a recipient couldn't, on an iPhone). The
+A plain player can't go full screen on an iPhone from inside the sandboxed frame. The
 template adds a big **Full screen** button that tries, in order:
 1. the standard Fullscreen API (desktop, Android, iPad);
 2. the iPhone's own video player (`webkitEnterFullscreen`);
