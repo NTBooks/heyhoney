@@ -102,8 +102,89 @@ live on disk and in R2, not in git history, so re-exporting a video doesn't grow
 delete live media that's missing from the folder (a fresh clone has none). Pass `--drop-media` to delete it on
 purpose. Files over 300 MB can't be uploaded through wrangler, so re-encode them first.
 
-For video in a page: bundle the file and use `<video src="clip.mp4" controls>`. Start playback from the
-user's click (call `play()` inside the click handler). YouTube embeds don't load in the sandbox.
+For video in a page: bundle the file and use the **video page template below**, never a bare `<video>` tag.
+A plain player can't go full screen on an iPhone from inside the sandboxed frame (a recipient couldn't, on an iPhone). The
+template adds a big **Full screen** button that tries, in order:
+1. the standard Fullscreen API (desktop, Android, iPad);
+2. the iPhone's own video player (`webkitEnterFullscreen`);
+3. if neither opens within half a second, a "theater" mode that fills the page, with a × to close and a
+   "turn your phone sideways" hint in portrait.
+
+It also keeps an "open the video on its own" link. Start playback only from the user's click. YouTube embeds
+don't load in the sandbox. For a long or large master, ship a 1080p copy under 300 MB with a keyframe every
+second, so seeking is quick. Pick a poster frame that's sharp and shows the cast (not motion-blurred). Change
+the title, blurb, file names and accent colour (`--accent`), and keep the rest as it is.
+
+```html
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>TITLE</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Anton&family=Inter:wght@400;500;800&display=swap">
+<style>
+  :root { --bg:#0e0e12; --fg:#f2f2f0; --accent:#FFC94D; --mut:#9a9aa6; color-scheme: dark }
+  html,body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.55 Inter, system-ui, sans-serif }
+  main { max-width: 1100px; margin: 0 auto; padding: 28px 16px 40px; }
+  h1 { font: 400 clamp(40px, 8vw, 72px)/1 Anton, Impact, sans-serif; margin: 0 0 6px; letter-spacing: .02em; color: var(--accent) }
+  p.by { margin: 0 0 18px; color: var(--mut) }
+  .stage { position: relative }
+  video { width: 100%; height: auto; display: block; border-radius: 8px; background: #000; box-shadow: 0 0 0 1px #26262e }
+  .bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 14px }
+  button.fs { font: 800 17px/1 Inter, sans-serif; color: #111; background: var(--accent); border: 0; border-radius: 10px;
+    padding: 14px 20px; cursor: pointer; display: inline-flex; gap: 10px; align-items: center }
+  button.fs svg { width: 20px; height: 20px }
+  a.own { color: var(--mut); font-size: 14px }
+  p.note { color: var(--mut); font-size: 14px; margin-top: 14px }
+  /* theater: the fallback when the phone won't hand the video to its own full-screen player */
+  body.theater { overflow: hidden }
+  body.theater .stage { position: fixed; inset: 0; z-index: 10; background: #000; display: flex; align-items: center; justify-content: center }
+  body.theater video { width: 100vw; height: 100vh; height: 100dvh; object-fit: contain; border-radius: 0; box-shadow: none }
+  .close { display: none; position: absolute; top: max(12px, env(safe-area-inset-top)); right: max(12px, env(safe-area-inset-right)); z-index: 11;
+    width: 44px; height: 44px; border-radius: 22px; border: 0; background: rgba(255,255,255,0.18); color: #fff; font: 800 22px/44px Inter, sans-serif; cursor: pointer }
+  .hint { display: none; position: absolute; left: 16px; right: 70px; top: max(22px, calc(env(safe-area-inset-top) + 10px)); color: #ccc; font-size: 14px; pointer-events: none }
+  body.theater .close { display: block }
+  @media (orientation: portrait) { body.theater .hint { display: block } }
+</style></head>
+<body><main>
+  <h1>TITLE</h1>
+  <p class="by">ONE-LINE BLURB.</p>
+  <div class="stage">
+    <video id="v" src="video.mp4" poster="poster.jpg" controls playsinline preload="metadata"></video>
+    <button class="close" id="close" aria-label="Exit full screen">×</button>
+    <div class="hint">Turn your phone sideways for a bigger picture</div>
+  </div>
+  <div class="bar">
+    <button class="fs" id="fs" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+      Full screen
+    </button>
+    <a class="own" href="video.mp4" target="_blank" rel="noopener">or open the video on its own</a>
+  </div>
+  <p class="note">Press play and turn the sound up.</p>
+</main>
+<script>
+  const v = document.getElementById('v');
+  const theater = (on) => { document.body.classList.toggle('theater', on); if (on) v.play().catch(() => {}); };
+  document.getElementById('close').addEventListener('click', () => theater(false));
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') theater(false); });
+  document.getElementById('fs').addEventListener('click', () => {
+    const req = v.requestFullscreen || v.webkitRequestFullscreen;   // 1. the standard Fullscreen API
+    if (req && document.fullscreenEnabled !== false) {
+      try { const p = req.call(v); if (p && p.catch) p.catch(() => tryIphone()); return; } catch (e) { /* fall through */ }
+    }
+    tryIphone();
+  });
+  function tryIphone() {   // 2. the iPhone's own player; 3. if it doesn't open in half a second, fill the page
+    let opened = false;
+    v.addEventListener('webkitbeginfullscreen', () => { opened = true; }, { once: true });
+    try { v.play().catch(() => {}); if (v.webkitEnterFullscreen) v.webkitEnterFullscreen(); } catch (e) { /* fall through */ }
+    setTimeout(() => { if (!opened && !document.fullscreenElement) theater(true); }, 500);
+  }
+</script>
+</body></html>
+```
+
+To add the button to a video site that is already live, rebuild its `index.html` from the template, keeping
+its title, blurb and file names. Then run `hh publish <slug>`: the links people already have keep working.
 
 `hh list` shows `[ephemeral]`, and `gone` for an ephemeral site that has self-destructed (`publish` brings it
 back while the local copy exists; `prune` deletes the local copy).
